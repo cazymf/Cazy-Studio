@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import engine
 import quality_engine
 import quality_ui
-import autodirector_fullrun
+import quality_engine as autodirector_fullrun
 import update_center
 import engine as preview_tools
 from preview_worker import PreviewDecoder
@@ -44,7 +44,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.11  |  AutoDirector Full Run')
+        self.title('Cazy Studio v0.3.12  |  AutoDirector Full Run')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)

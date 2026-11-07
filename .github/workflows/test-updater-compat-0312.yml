@@ -1,0 +1,83 @@
+name: Validate v0.3.12 Legacy-Updater Compatibility
+on:
+  push:
+    branches: [fix/updater-compatibility-0312]
+    paths:
+      - 'source/**'
+      - 'tests/**'
+      - '.github/workflows/test-updater-compat-0312.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test requirements
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg
+      - name: Test Full Run and GUI with embedded engine
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Build update and install using EXACT v0.3.10 updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy312/old /tmp/cazy312/stage /tmp/cazy312/out
+          gh release download v0.3.10 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_10_Update.zip' --dir /tmp/cazy312/old
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy312/stage/
+          PYTHONPATH=source python - <<'PY'
+          from pathlib import Path
+          import hashlib, importlib.util, tempfile, zipfile
+          from update_core import build_update_zip
+          old_zip=Path('/tmp/cazy312/old/Cazy_Studio_v0_3_10_Update.zip')
+          new_zip=Path('/tmp/cazy312/out/Cazy_Studio_v0_3_12_Update.zip')
+          new=build_update_zip('/tmp/cazy312/stage',new_zip,'0.3.12')
+          # Only existing v0.3.10-approved files may appear in this package.
+          allowed={'app.py','quality_engine.py','quality_ui.py',
+                   'update_core.py','version.py'}
+          assert set(new['files'])==allowed, new['files']
+          with zipfile.ZipFile(old_zip) as archive:
+              old_updater=archive.read('update_core.py')
+          with tempfile.TemporaryDirectory() as directory:
+              working=Path(directory)
+              old_script=working/'old_update_core.py'
+              old_script.write_bytes(old_updater)
+              spec=importlib.util.spec_from_file_location('legacy_update_core',old_script)
+              legacy=importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(legacy)
+              print('LEGACY SAFE_FILES:',sorted(legacy.SAFE_FILES))
+              assert allowed.issubset(legacy.SAFE_FILES)
+              checked=legacy.inspect_update_zip(new_zip,'0.3.12')
+              assert set(checked['files'])==allowed
+              install=working/'installation'
+              install.mkdir()
+              with zipfile.ZipFile(old_zip) as archive:
+                  old_manifest=legacy.inspect_update_zip(old_zip,'0.3.10')
+                  for name in old_manifest['files']:
+                      (install/name).write_bytes(archive.read(name))
+              original_app=(install/'app.py').read_bytes()
+              legacy.apply_update_zip(new_zip,install,'0.3.12')
+              assert (install/'version.py').read_text().strip()=="APP_VERSION = '0.3.12'"
+              assert 'def render_full_run(' in (install/'quality_engine.py').read_text()
+              assert 'import quality_engine as autodirector_fullrun' in (install/'app.py').read_text()
+              assert not (install/'autodirector_fullrun.py').exists()
+              legacy.rollback_latest(install)
+              assert (install/'version.py').read_text().strip()=="APP_VERSION = '0.3.10'"
+              assert (install/'app.py').read_bytes()==original_app
+              print('EXACT v0.3.10 legacy updater accepted v0.3.12 and rolled back: PASS')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_12_CompatibilityPreview
+          path: /tmp/cazy312/out/Cazy_Studio_v0_3_12_Update.zip
+          if-no-files-found: error

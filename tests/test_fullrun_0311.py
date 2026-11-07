@@ -16,7 +16,7 @@ sys.modules.setdefault('engine',types.ModuleType('engine'))
 engine=sys.modules['engine']
 if not hasattr(engine,'MediaInfo'):
     engine.MediaInfo=type('MediaInfo',(object,),{})
-import autodirector_fullrun as fullrun
+import quality_engine as fullrun
 
 
 def ev(at,kind,confidence=.98):
