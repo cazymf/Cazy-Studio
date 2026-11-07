@@ -19,6 +19,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import engine
 import quality_engine
 import quality_ui
+import autodirector_fullrun
 import update_center
 import engine as preview_tools
 from preview_worker import PreviewDecoder
@@ -43,7 +44,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.10  |  Real-ESRGAN Correction')
+        self.title('Cazy Studio v0.3.11  |  AutoDirector Full Run')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
@@ -1011,6 +1012,7 @@ def _autodirector_defaults():
         'schema': 1, 'queue': [], 'music_folder': '', 'random_music': True,
         'avoid_repeats': True, 'mode': _AUTODIRECTOR_MODES[0],
         'visibility': 'Private', 'render_preset': '', 'recent_music': '', 'success_reference': '',
+        'references': {},
     }
 
 
@@ -1030,6 +1032,8 @@ def _autodirector_validate(state):
         raise ValueError('Invalid render preset')
     if not isinstance(state.get('success_reference', ''), str) or len(state.get('success_reference', '')) > 4096:
         raise ValueError('Invalid completion screenshot path')
+    autodirector_fullrun.normalize_references(state.get('references',{}),
+                                                 state.get('success_reference',''))
     if not isinstance(state.get('recent_music'), str) or len(state['recent_music']) > 4096:
         raise ValueError('Invalid previously selected song')
     if not isinstance(state.get('random_music'), bool) or not isinstance(state.get('avoid_repeats'), bool):
@@ -1133,6 +1137,7 @@ class AutoDirectorView(tk.Frame):
         self.random_var = tk.BooleanVar(value=self.state['random_music'])
         self.avoid_var = tk.BooleanVar(value=self.state['avoid_repeats'])
         self.preset_var = tk.StringVar(value=self.state.get('render_preset', ''))
+        self._full_run_result = None
         self._auto_busy = False
         self._auto_messages = queue.Queue()
         self._auto_cancel = threading.Event()
@@ -1235,9 +1240,9 @@ class AutoDirectorView(tk.Frame):
 
         bottom = tk.Frame(library, bg=CARD)
         bottom.pack(fill='x', padx=14, pady=(0, 14))
-        self._label(bottom, 'Local beta detector  •  review each result',
+        self._label(bottom, 'Full Run = every half joined into one video',
                     9, MUTED).pack(side='left', pady=8)
-        self._button(bottom, 'SCAN SELECTED VIDEO', self.scan_selected, True).pack(side='right')
+        self._button(bottom, 'SCAN / REVIEW RUN', self.scan_selected, True).pack(side='right')
         self._button(bottom, 'Assign Music', self.prepare).pack(side='right', padx=(0, 7))
 
         self._label(options, '2  EDITING PLAN', 13, ACCENT2, True).pack(
@@ -1246,6 +1251,7 @@ class AutoDirectorView(tk.Frame):
             anchor='w', padx=15, pady=(0, 4))
         self._combo(options, self.mode_var, _AUTODIRECTOR_MODES).pack(
             fill='x', padx=15, pady=(0, 7))
+        self._label(options, 'Full Run joins ALL successful halves into ONE MP4.', 9, ACCENT2).pack(anchor='w', padx=15, pady=(0, 7))
         self._label(options, 'Fight detection is experimental — cuts require review.',
                     9, YELLOW).pack(anchor='w', padx=15, pady=(0, 12))
 
@@ -1275,9 +1281,9 @@ class AutoDirectorView(tk.Frame):
         self._button(options, 'Reload Saved Presets', self.reload_presets).pack(anchor='w', padx=15, pady=(0, 4))
         self.preset_hint = self._label(options, 'Loading named presets...', 9, MUTED)
         self.preset_hint.pack(anchor='w', padx=15, pady=(0, 9))
-        self._label(options, 'DETECTION EXAMPLE (OPTIONAL)', 11, ACCENT2, True).pack(anchor='w', padx=15, pady=(0, 5))
-        self._button(options, 'Choose Success Screenshot', self.choose_success_reference).pack(anchor='w', padx=15)
-        self.reference_hint = self._label(options, 'No example screenshot', 9, MUTED)
+        self._label(options, 'ABYSS DETECTION REFERENCES', 11, ACCENT2, True).pack(anchor='w', padx=15, pady=(0, 5))
+        self._button(options, 'Manage Multiple Screenshots', self.manage_references).pack(anchor='w', padx=15)
+        self.reference_hint = self._label(options, 'Start / Other Side / Completed', 9, MUTED)
         self.reference_hint.pack(anchor='w', padx=15, pady=(4, 8))
 
         review = tk.Frame(options, bg=CARD2)
@@ -1294,7 +1300,7 @@ class AutoDirectorView(tk.Frame):
 
         footer = tk.Frame(self, bg=BG)
         footer.pack(fill='x', padx=18, pady=(0, 12))
-        self._label(footer, 'BETA: detect result screens, edit times, render video + thumbnail + title locally. No uploads.',
+        self._label(footer, 'FULL RUN: scan selected recordings → review chamber halves → ONE finished MP4. No uploads.',
                     9, ACCENT2, True).pack(anchor='w')
         tk.Label(footer, textvariable=self.status_var, bg=BG, fg=MUTED,
                  anchor='w', font=('Segoe UI', 9), wraplength=1150,
@@ -1344,8 +1350,10 @@ class AutoDirectorView(tk.Frame):
         if self.preset_var.get() not in names:
             self.preset_var.set(names[0])
         self.preset_hint.configure(text=f'{len(names)-1} saved Quality Lab presets')
-        example = self.state.get('success_reference', '')
-        self.reference_hint.configure(text=Path(example).name if example else 'No example screenshot')
+        references = autodirector_fullrun.normalize_references(
+            self.state.get('references',{}),self.state.get('success_reference',''))
+        self.reference_hint.configure(text='  •  '.join(
+            f'{key}: {len(references[key])}' for key in ('start','switch','complete')))
         self._update_details()
 
     def _selected(self):
@@ -1517,6 +1525,9 @@ class AutoDirectorView(tk.Frame):
             self.status_var.set('Example success screenshot selected for future scans.')
 
     def scan_selected(self):
+        if self.mode_var.get() == 'Full Run':
+            self.scan_entire_full_run()
+            return
         selected = self._selected()
         if selected < 0:
             messagebox.showinfo('Select a video', 'Select one of your videos first.', parent=self)
@@ -1536,7 +1547,7 @@ class AutoDirectorView(tk.Frame):
             return
         self._auto_busy = True
         self._auto_cancel.clear()
-        self.status_var.set('Scanning selected video for Genshin results…')
+        self.status_var.set('Scanning for Genshin challenge transitions…')
 
         def background():
             try:
@@ -1559,6 +1570,13 @@ class AutoDirectorView(tk.Frame):
                     self._auto_busy = False
                     self.status_var.set(f'Found {len(data["candidates"])} possible result screens. Review suggested times.')
                     self.review_results(data)
+                elif event == 'fullrun_done':
+                    self._auto_busy = False
+                    self._full_run_result = data
+                    self.status_var.set(
+                        f'Found {data["completed_chambers"]} completed chambers / '
+                        f'{len(data["segments"])} halves. Review before ONE-video export.')
+                    self.review_full_run(data)
                 elif event == 'render_progress':
                     pct, step = data
                     self.status_var.set(f'Local rendering: {pct:.0f}% — {step}')
