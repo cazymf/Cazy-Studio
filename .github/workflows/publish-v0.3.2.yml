@@ -1,0 +1,51 @@
+name: Publish Cazy Studio v0.3.2 Fast AI fix
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0.3.2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch exact staged package
+        uses: actions/checkout@v4
+
+      - name: Decode and validate verified Cazy Studio update
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          base64 --decode update-packages/Cazy_Studio_v0_3_2_Update.base64 > dist/Cazy_Studio_v0_3_2_Update.zip
+          echo '765f3e5c39061ede2e46bf568f9038f9e2645beaad6292697190f78730c424c2  dist/Cazy_Studio_v0_3_2_Update.zip' | sha256sum --check
+          python - <<'PY'
+          import zipfile,json,hashlib
+          p='dist/Cazy_Studio_v0_3_2_Update.zip'
+          with zipfile.ZipFile(p) as z:
+              m=json.loads(z.read('update_manifest.json'))
+              assert m['product']=='CazyStudio' and m['format']==1 and m['version']=='0.3.2',m
+              names=set(z.namelist())
+              assert names==set(m['files'])|{'update_manifest.json'}, names
+              assert set(m['files'])=={'quality_engine.py','quality_ui.py','app.py','update_core.py','version.py'}, names
+              for name,digest in m['files'].items():
+                  assert hashlib.sha256(z.read(name)).hexdigest()==digest,name
+              assert z.testzip() is None
+          print('Cazy Studio v0.3.2 ZIP validated')
+          PY
+
+      - name: Publish the update for the in-app Update Center
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ASSET=dist/Cazy_Studio_v0_3_2_Update.zip
+          if gh release view v0.3.2 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.2 "$ASSET" --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.2 "$ASSET" --repo "$GITHUB_REPOSITORY" --title 'Cazy Studio v0.3.2 — Fast AI Rendering Fix' --notes 'Fixes runaway AI render times and giant scratch-image directories. Real-ESRGAN now crops and resizes before upscaling; AI processing FPS has Fast 30, Balanced 60, and Every Frame modes. Shows processed-frame progress, suppresses empty console windows, and cleans redundant scratch frames. AI frame rate below export frame rate duplicates frames; select Every Frame to retain unique source motion.'
+          fi
+          gh release edit v0.3.2 --repo "$GITHUB_REPOSITORY" --latest
