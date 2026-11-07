@@ -58,6 +58,26 @@ jobs:
           assert hashlib.sha256(p.read_bytes()).hexdigest() == '89bae1af854b3fa525babf39941a5d27c7900fa30c09704a75db689f09d48dbe'
           PY
 
+      - name: Keep v0.3.2 updater compatibility
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          p=Path('app.py')
+          script=p.read_text()
+          worker=Path('preview_worker.py').read_text()
+          assert 'from preview_worker import PreviewDecoder\n' in script
+          decoder=worker[worker.index('class PreviewDecoder:'):]
+          script=script.replace('from preview_worker import PreviewDecoder\n','',1)
+          script=script.replace('class Studio(tk.Tk):',decoder+'\n\nclass Studio(tk.Tk):',1)
+          p.write_text(script)
+          assert hashlib.sha256(p.read_bytes()).hexdigest()=='5201431fea1053e2bc2934bc4ffbbe2e7cc83e310654e5c0bbfe99ca1c375f31'
+          # Older updaters only permit existing app files: decoder is embedded in app.py.
+          Path('preview_worker.py').unlink()
+          PY
+
       - name: Package validated v0.3.3 update
         run: |
           set -euo pipefail
@@ -65,7 +85,7 @@ jobs:
           python - <<'PY'
           import json,zipfile,hashlib
           from pathlib import Path
-          files=['app.py','preview_worker.py','update_core.py','version.py']
+          files=['app.py','update_core.py','version.py']
           manifest={'product':'CazyStudio','format':1,'version':'0.3.3',
                     'files':{name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in files}}
           with zipfile.ZipFile('Cazy_Studio_v0_3_3_Update.zip','w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
