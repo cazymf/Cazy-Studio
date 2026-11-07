@@ -44,7 +44,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.14  |  OCR Abyss Full Run')
+        self.title('Cazy Studio v0.3.15  |  Silent OCR')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
