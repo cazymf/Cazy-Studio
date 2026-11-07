@@ -1,0 +1,129 @@
+name: Publish Cazy Studio v0.3.4 trim and render progress
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0.3.4.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download exact previous update sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cazy034"
+          cd "$RUNNER_TEMP/cazy034"
+          gh release download v0.3.3 --repo "$GITHUB_REPOSITORY" --pattern 'Cazy_Studio_v0_3_3_Update.zip'
+          gh release download v0.3.2 --repo "$GITHUB_REPOSITORY" --pattern 'Cazy_Studio_v0_3_2_Update.zip'
+          python - <<'PY'
+          import zipfile
+          from pathlib import Path
+          with zipfile.ZipFile('Cazy_Studio_v0_3_3_Update.zip') as z:
+              for name in ('app.py','update_core.py','version.py'):
+                  Path(name).write_bytes(z.read(name))
+          with zipfile.ZipFile('Cazy_Studio_v0_3_2_Update.zip') as z:
+              for name in ('quality_engine.py','quality_ui.py'):
+                  Path(name).write_bytes(z.read(name))
+          PY
+
+      - name: Rebuild preview worker and apply tested fixes
+        env:
+          PATCH_B64: "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"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy034"
+          python - <<'PY'
+          import os,base64,zlib,tarfile,io,hashlib
+          from pathlib import Path
+          raw=zlib.decompress(base64.b64decode(os.environ['PATCH_B64']))
+          with tarfile.open(fileobj=io.BytesIO(raw),mode='r:') as tf:
+              for m in tf:
+                  assert m.name in ('patch.py','patch_progress.py') and m.isfile()
+                  Path(m.name).write_bytes(tf.extractfile(m).read())
+          source=Path('app.py').read_text()
+          assert hashlib.sha256(source.encode()).hexdigest()=='5201431fea1053e2bc2934bc4ffbbe2e7cc83e310654e5c0bbfe99ca1c375f31'
+          a=source.index('class PreviewDecoder:')
+          b=source.index('\n\nclass Studio(tk.Tk):',a)
+          decoder=source[a:b]
+          header='''"""Non-blocking latest-frame decoder for Cazy Studio's editing monitor.
+
+          This worker never touches Tk widgets. OpenCV video decoding, optional resizing,
+          and PIL pixel conversion happen off the GUI thread. New scrubbing positions
+          replace old pending requests so playback cannot build an enormous backlog.
+          """
+          from __future__ import annotations
+          import queue
+          import threading
+          from pathlib import Path
+          from PIL import Image
+
+          try:
+              import cv2
+          except ImportError:
+              cv2 = None
+
+          import engine
+
+
+          '''
+          # Remove YAML block indentation from the embedded Python module header.
+          header='\n'.join(line[10:] if line.startswith('          ') else line for line in header.splitlines())+'\n'
+          Path('preview_worker.py').write_text(header+decoder)
+          assert hashlib.sha256(Path('preview_worker.py').read_bytes()).hexdigest()=='ab8ed02f809eccd669aea29321eb219e6961d91471040ef691f162ddd028ca24'
+          source=(source[:a]+source[b+2:]).replace('import engine as preview_tools\n','import engine as preview_tools\nfrom preview_worker import PreviewDecoder\n',1)
+          Path('app.py').write_text(source)
+          assert hashlib.sha256(Path('app.py').read_bytes()).hexdigest()=='597f0b19f590517c826f0fc1eb93942b78521ec1da1eace7ae635fed7c48ba76'
+          PY
+          python patch.py
+          python patch_progress.py
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          expected={
+              'app.py':'8d340d8a698f604a2f2a5bb1573ce94a817076b95c2e670204e545d241e0646c',
+              'quality_engine.py':'ef672bc87a407f458c1e2c0eee0c7a0c539fb33e5f42a36e49df89937bcacb38',
+              'quality_ui.py':'3e1e606c66d6cb530c87bf1dd424d186e68e45de6d2f8ba8545b449b3883d762',
+              'update_core.py':'d4b8ea5e9da3e4ed8d2fed65c37b85f28928b757ed1f7788ccda3b74a9c0cfbc',
+              'version.py':'c0a043decbf147d6bc5b53aa69fe7a1ad92b1f886895bb74e2948583f684b531',
+              'preview_worker.py':'ab8ed02f809eccd669aea29321eb219e6961d91471040ef691f162ddd028ca24'
+          }
+          for name,digest in expected.items():
+              actual=hashlib.sha256(Path(name).read_bytes()).hexdigest()
+              assert actual==digest, f'{name}: {actual} does not match {digest}'
+          PY
+
+      - name: Package and validate v0.3.4
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy034"
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib,json,zipfile,py_compile
+          files=['app.py','preview_worker.py','quality_engine.py','quality_ui.py','update_core.py','version.py']
+          for name in files:py_compile.compile(name,doraise=True)
+          manifest={'product':'CazyStudio','format':1,'version':'0.3.4',
+                    'files':{f:hashlib.sha256(Path(f).read_bytes()).hexdigest() for f in files}}
+          with zipfile.ZipFile('Cazy_Studio_v0_3_4_Update.zip','w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for name in files:z.write(name,name)
+              z.writestr('update_manifest.json',json.dumps(manifest,indent=2))
+          import update_core
+          assert update_core.inspect_update_zip('Cazy_Studio_v0_3_4_Update.zip','0.3.4')
+          PY
+
+      - name: Publish newest verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy034"
+          if gh release view v0.3.4 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.4 Cazy_Studio_v0_3_4_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.4 Cazy_Studio_v0_3_4_Update.zip --repo "$GITHUB_REPOSITORY" --title 'Cazy Studio v0.3.4 - Trim & Render Progress' --notes 'Quality Lab now respects the selected trimmed timeline clip. Accurate weighted render progress tracks FFmpeg extraction, AI upscaled-frame completion and MP4 encoding. Existing v0.3.3 users are compatible.'
+          fi
+          gh release edit v0.3.4 --repo "$GITHUB_REPOSITORY" --latest
