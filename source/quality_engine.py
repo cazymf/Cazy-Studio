@@ -1106,20 +1106,48 @@ def classify_screen_text(text):
     return None
 
 
+def _abyss_screen_profile(frame,cv2):
+    """Fast contrast probe: identify black transition and darkened result UI.
+
+    This operates entirely with OpenCV and avoids launching OCR on blank
+    loading screens. We do NOT classify a successful clear from colors alone.
+    """
+    tiny=cv2.resize(frame,(320,180),interpolation=cv2.INTER_AREA)
+    gray=cv2.cvtColor(tiny,cv2.COLOR_BGR2GRAY)
+    mean=float(gray.mean())
+    dark=float((gray<60).mean())
+    mid=gray[45:126,50:272]
+    letters=float((mid>165).mean())
+    return {
+        'transition': mean<17 and dark>.96 and letters>.0009,
+        'result': mean<45 and dark>.84 and letters>.008,
+        'black_blank':mean<15 and dark>.96 and letters<=.0009,
+        'mean':mean,
+    }
+
+
 def _abyss_text_regions(frame,cv2):
-    """Look where Genshin displays the interaction prompt and banners."""
+    """OCR UI text in different regions depending on the screen type."""
     h,w=frame.shape[:2]
-    for label,(x1,y1,x2,y2) in (
-        ('mechanism',(0.48,.42,.88,.64)),
-        ('center banner',(.18,.18,.85,.68)),
-    ):
+    profile=_abyss_screen_profile(frame,cv2)
+    mechanism=('Start Challenge area',(.50,.45,.93,.67))
+    transition=('On the other side center',(.19,.25,.83,.69))
+    complete=('Challenge Completed banner',(.23,.19,.81,.50))
+    if profile['transition']:
+        windows=[transition]
+    elif profile['result']:
+        windows=[complete,transition,mechanism]
+    else:
+        windows=[mechanism,complete,transition]
+    for label,(x1,y1,x2,y2) in windows:
         crop=frame[int(y1*h):int(y2*h),int(x1*w):int(x2*w)]
-        if crop.size==0:
+        if not crop.size:
             continue
         gray=cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
-        gray=cv2.resize(gray,None,fx=1.75,fy=1.75,
+        gray=cv2.resize(gray,None,fx=1.65,fy=1.65,
                         interpolation=cv2.INTER_CUBIC)
         yield label,gray
+
 
 
 def _cazy_subprocess_flags(platform=None):
@@ -1129,11 +1157,7 @@ def _cazy_subprocess_flags(platform=None):
 
 
 def read_abyss_frame_text(frame,executable,cancel=None):
-    """Recognize Start Challenge / On the other side / Challenge Completed.
-
-    Tesseract processes only local frames; no screenshot examples or cloud.
-    Multiple binarization styles help when a combat background changes.
-    """
+    """Read actual Genshin UI strings using local, hidden-console Tesseract."""
     import cv2
     if not executable:
         raise RuntimeError('Text detection needs Tesseract OCR. Locate tesseract.exe in AutoDirector.')
@@ -1141,17 +1165,21 @@ def read_abyss_frame_text(frame,executable,cancel=None):
         for attempt in range(2):
             if cancel is not None and cancel.is_set():
                 raise RuntimeError('Scan cancelled')
-            sample=(gray if attempt==0 else cv2.threshold(
-                gray,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1])
+            if attempt==0:
+                sample=gray
+                psm='6'
+            else:
+                sample=cv2.threshold(gray,0,255,cv2.THRESH_BINARY+
+                                     cv2.THRESH_OTSU)[1]
+                psm='11'
             ok,png=cv2.imencode('.png',sample)
             if not ok:
                 continue
             try:
                 result=subprocess.run(
-                    [executable,'stdin','stdout','--psm','11' if attempt==0 else '6',
-                     '-l','eng'],input=png.tobytes(),capture_output=True,
-                    timeout=7,check=False,
-                    creationflags=_cazy_subprocess_flags())
+                    [executable,'stdin','stdout','--psm',psm,'-l','eng'],
+                    input=png.tobytes(),capture_output=True,timeout=7,
+                    check=False,creationflags=_cazy_subprocess_flags())
             except subprocess.TimeoutExpired:
                 continue
             except OSError as exc:
@@ -1167,6 +1195,8 @@ def read_abyss_frame_text(frame,executable,cancel=None):
                 evidence='OCR text (%s): %s'%(label,' '.join(raw.split())[:100])
                 return kind,.97,evidence
     return None,0.,''
+
+
 
 
 # Crop screen regions by event, relative to a 960x540 standardized frame.
@@ -1366,11 +1396,13 @@ def build_abyss_segments(events,source,duration,first_chamber=1):
 
 
 def scan_abyss_recording(path,references=None,progress=None,cancel=None,
-                         sample_seconds=.8,ocr_path=''):
-    """Read the whole recording's printed game text using offline OCR.
+                         sample_seconds=.8,ocr_path='',detail=None):
+    """Scan full OBS recording with high-frequency black-transition checks.
 
-    Prior screenshot references remain in saved user data for compatibility,
-    but they are NEVER used as event triggers in text detection mode.
+    Screens are inspected every 0.4s. Standard OCR is scheduled every 0.8s;
+    near-black transition screens are OCR'd immediately so a brief 'On the
+    other side...' flash cannot slip between slow sampling points. Suggested
+    cuts still require human review before rendering.
     """
     import cv2
     footage=Path(path)
@@ -1388,30 +1420,57 @@ def scan_abyss_recording(path,references=None,progress=None,cancel=None,
         duration=frames/fps if fps>0 else 0.
         if not math.isfinite(duration) or duration<=0:
             raise RuntimeError('Cannot determine recording duration')
-        interval=max(.4,min(2.,float(sample_seconds)))
+        # Old mode sampled once every .8s, missing shorter transition screens.
+        # Read frames 2x more often; spend OCR cycles mostly on useful frames.
+        interval=max(.25,min(.4,float(sample_seconds)/2.))
+        ocr_every=max(.6,min(1.25,float(sample_seconds)))
+        next_regular_ocr=0.
+        last_transition_ocr=-100.
         events=[]
         t=0.
         last_kind=None
         last_seen=-100.
+        last_report=-100.
         while t<duration:
             if cancel is not None and cancel.is_set():
                 raise RuntimeError('Scan cancelled')
             cap.set(cv2.CAP_PROP_POS_MSEC,t*1000.)
             ok,frame=cap.read()
             if ok:
-                kind,confidence,evidence=read_abyss_frame_text(
-                    frame,executable,cancel=cancel)
-                if kind:
-                    # OCR may see the same prompt on many consecutive frames.
-                    # Keep the *first* time it appeared, never the last.
-                    if kind!=last_kind or t-last_seen>4.0:
-                        events.append({'at':round(t,2),'kind':kind,
-                                       'confidence':confidence,'evidence':evidence})
-                    last_kind,last_seen=kind,t
-                elif t-last_seen>4.0:
-                    last_kind=None
-            if progress:
+                profile=_abyss_screen_profile(frame,cv2)
+                immediate_transition=(profile['transition']
+                                      and t-last_transition_ocr>=.4)
+                immediate_result=(profile['result']
+                                  and t>=next_regular_ocr-.35)
+                should_ocr=(immediate_transition or immediate_result
+                            or t>=next_regular_ocr)
+                if profile['black_blank']:
+                    # No visible lettering; plain black loading frame.
+                    should_ocr=False
+                if should_ocr:
+                    kind,confidence,evidence=read_abyss_frame_text(
+                        frame,executable,cancel=cancel)
+                    if immediate_transition:
+                        last_transition_ocr=t
+                    next_regular_ocr=t+ocr_every
+                    if kind:
+                        if kind!=last_kind or t-last_seen>4.0:
+                            events.append({'at':round(t,2),'kind':kind,
+                                           'confidence':confidence,'evidence':evidence})
+                        last_kind,last_seen=kind,t
+                    elif t-last_seen>4.0:
+                        last_kind=None
+            if progress and (t-last_report>=1.2 or t+interval>=duration):
                 progress(min(1.,t/duration))
+            if detail and (t-last_report>=1.2 or t+interval>=duration):
+                counts={kind:sum(event['kind']==kind for event in events)
+                        for kind in ('start','switch','complete','failure')}
+                detail({'at':round(t,2),'duration':round(duration,2),
+                        'found':', '.join(f'{k.title()} {v}'
+                                           for k,v in counts.items()),
+                        'counts':counts})
+            if t-last_report>=1.2 or t+interval>=duration:
+                last_report=t
             t+=interval
         if progress:
             progress(1.)
@@ -1427,8 +1486,8 @@ def scan_abyss_recording(path,references=None,progress=None,cancel=None,
 
 
 def scan_full_run(paths,references=None,progress=None,cancel=None,
-                  sample_seconds=.8,ocr_path=''):
-    """Scan every user-selected recording, preserving queue and chamber order."""
+                  sample_seconds=.8,ocr_path='',detail=None):
+    """Scan selected recordings, report actual progress and OCR event totals."""
     paths=list(paths)
     if not paths:
         raise ValueError('Add selected OBS recordings before scanning')
@@ -1440,7 +1499,13 @@ def scan_full_run(paths,references=None,progress=None,cancel=None,
             path,references,cancel=cancel,sample_seconds=sample_seconds,
             ocr_path=ocr_path,
             progress=(lambda fraction,j=i:
-                      progress((j+fraction)/len(paths))) if progress else None)
+                      progress((j+fraction)/len(paths))) if progress else None,
+            detail=(lambda data,j=i,p=path:
+                    detail(dict(data,video_index=j+1,
+                                total_videos=len(paths),filename=Path(p).name,
+                                fraction=(j+data['at']/max(.1,data['duration']))/
+                                         len(paths)))
+                   if detail else None))
         for seg in report['segments']:
             seg['chamber']+=chamber-1
         chamber+=report['completed_chambers']
