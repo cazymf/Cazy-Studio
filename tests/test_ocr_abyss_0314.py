@@ -87,6 +87,32 @@ class OCRFullRunTests(unittest.TestCase):
                 self.assertGreater(confidence,.9)
                 self.assertIn('OCR text',evidence)
 
+    def test_windows_hidden_console_flags_and_ocr_launch(self):
+        """No Windows Command Prompt must appear for each scanned frame."""
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest('OpenCV unavailable')
+        with mock.patch.object(quality.subprocess,'CREATE_NO_WINDOW',
+                               0x08000000,create=True):
+            self.assertEqual(quality._cazy_subprocess_flags('nt'),0x08000000)
+            self.assertEqual(quality._cazy_subprocess_flags('posix'),0)
+        image=np.zeros((540,960,3),dtype=np.uint8)
+        with mock.patch.object(quality,'_cazy_subprocess_flags',
+                               return_value=0x08000000), \
+             mock.patch.object(quality.subprocess,'run',return_value=
+                               types.SimpleNamespace(returncode=0,
+                                   stdout=b'Start Challenge\n',stderr=b'')) as invoke:
+            kind,confidence,evidence=quality.read_abyss_frame_text(
+                image,'C:\\Program Files\\Tesseract-OCR\\tesseract.exe')
+        self.assertEqual(kind,'start')
+        self.assertTrue(invoke.called)
+        self.assertTrue(all(
+            item.kwargs.get('creationflags')==0x08000000
+            for item in invoke.call_args_list))
+        self.assertIn('Start Challenge',evidence)
+
     def test_custom_ocr_executable_path(self):
         with tempfile.TemporaryDirectory() as d:
             program=Path(d)/'tesseract.exe'

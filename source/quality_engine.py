@@ -578,9 +578,11 @@ def compare_images(path:str, timestamp:float,opts:QualitySettings, folder:str) -
     before.denoise=0;before.sharpen=0
     before.contrast=100;before.saturation=100
     base_filters=_filter_chain(info,before,only_image=True)+['scale=960:-2:flags=lanczos']
-    subprocess.run(base+['-vf',','.join(base_filters),a],check=True,capture_output=True)
+    subprocess.run(base+['-vf',','.join(base_filters),a],check=True,capture_output=True,
+                   creationflags=_cazy_subprocess_flags())
     filters=_filter_chain(info,opts,only_image=True)+['scale=960:-2:flags=lanczos']
-    subprocess.run(base+['-vf',','.join(filters),b],check=True,capture_output=True)
+    subprocess.run(base+['-vf',','.join(filters),b],check=True,capture_output=True,
+                   creationflags=_cazy_subprocess_flags())
     return a,b
 
 
@@ -846,7 +848,8 @@ def cazy_detect_genshin(video_path, reference_path='', progress=None, cancel=Non
                         result = subprocess.run([ocr_program, 'stdin', 'stdout',
                                                  '--psm', '11', '-l', 'eng'],
                                                 input=binary.tobytes(), capture_output=True,
-                                                timeout=8, check=False)
+                                                timeout=8, check=False,
+                                                creationflags=_cazy_subprocess_flags())
                         kind = _cazy_classify_text(result.stdout.decode('utf-8', 'replace'))
                     except (OSError, subprocess.TimeoutExpired):
                         pass
@@ -976,7 +979,8 @@ def cazy_render_local_package(video_path, begin, finish, destination, preset_nam
                 cmd += ['-map', '0:v:0', '-map', '1:a:0', '-af', 'volume=0.20']
             cmd += ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '256k',
                     '-t', str(end-start), '-movflags', '+faststart', str(mixed)]
-            run = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            run = subprocess.run(cmd, capture_output=True, text=True, check=False,
+                                 creationflags=_cazy_subprocess_flags())
             if run.returncode:
                 raise RuntimeError('Music mix failed: ' + run.stderr[-1200:])
             final = mixed
@@ -1118,6 +1122,12 @@ def _abyss_text_regions(frame,cv2):
         yield label,gray
 
 
+def _cazy_subprocess_flags(platform=None):
+    """Suppress transient console windows from Windows CLI media/OCR tools."""
+    name=os.name if platform is None else platform
+    return getattr(subprocess,'CREATE_NO_WINDOW',0) if name=='nt' else 0
+
+
 def read_abyss_frame_text(frame,executable,cancel=None):
     """Recognize Start Challenge / On the other side / Challenge Completed.
 
@@ -1140,7 +1150,8 @@ def read_abyss_frame_text(frame,executable,cancel=None):
                 result=subprocess.run(
                     [executable,'stdin','stdout','--psm','11' if attempt==0 else '6',
                      '-l','eng'],input=png.tobytes(),capture_output=True,
-                    timeout=7,check=False)
+                    timeout=7,check=False,
+                    creationflags=_cazy_subprocess_flags())
             except subprocess.TimeoutExpired:
                 continue
             except OSError as exc:
