@@ -1,0 +1,90 @@
+name: Publish Cazy Studio v0.3.13 Preset and Abyss Detection Fix
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v0.3.13-preset-diagnostics.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install local-only tests
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg
+      - name: Test saved recipe UI, screenshot matching, Full Run and GUI
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Verify update ZIP with exact v0.3.12 installed updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy313/old /tmp/cazy313/stage /tmp/cazy313/out
+          gh release download v0.3.12 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_12_Update.zip' --dir /tmp/cazy313/old
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy313/stage
+          PYTHONPATH=source python - <<'PY'
+          import importlib.util,tempfile,zipfile
+          from pathlib import Path
+          from update_core import build_update_zip
+          base=Path('/tmp/cazy313')
+          old=base/'old/Cazy_Studio_v0_3_12_Update.zip'
+          latest=base/'out/Cazy_Studio_v0_3_13_Update.zip'
+          new=build_update_zip(base/'stage',latest,'0.3.13')
+          allowed={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          assert set(new['files'])==allowed
+          with tempfile.TemporaryDirectory() as folder:
+              root=Path(folder)
+              old_update=root/'legacy_update_core.py'
+              with zipfile.ZipFile(old) as z:
+                  old_update.write_bytes(z.read('update_core.py'))
+              spec=importlib.util.spec_from_file_location('legacy_updater',old_update)
+              updater=importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(updater)
+              assert allowed.issubset(updater.SAFE_FILES)
+              verified=updater.inspect_update_zip(latest,'0.3.13')
+              assert set(verified['files'])==allowed
+              install=root/'install'
+              install.mkdir()
+              with zipfile.ZipFile(old) as z:
+                  prev=updater.inspect_update_zip(old,'0.3.12')
+                  for name in prev['files']:
+                      (install/name).write_bytes(z.read(name))
+              updater.apply_update_zip(latest,install,'0.3.13')
+              assert (install/'version.py').read_text().strip()=="APP_VERSION = '0.3.13'"
+              assert 'def resolve_saved_render_preset' in (install/'quality_engine.py').read_text()
+              updater.rollback_latest(install)
+              assert (install/'version.py').read_text().strip()=="APP_VERSION = '0.3.12'"
+              print('Exact v0.3.12 updater installation and rollback: PASS')
+          PY
+      - name: Publish verified v0.3.13 update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /tmp/cazy313/out
+          if gh release view v0.3.13 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.13 Cazy_Studio_v0_3_13_Update.zip \
+              --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.13 Cazy_Studio_v0_3_13_Update.zip \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.3.13 — Real Saved Presets and Abyss Detection Report' \
+              --notes 'Fixes AutoDirector preset selection showing default settings: selecting a named Quality Lab recipe now shows its resolution, FPS, upscaler, frame generation, encoder and quality; View/Edit Saved Recipe in Quality Lab opens that same preset with all settings populated, rather than defaults. Both render paths share a verified named-preset resolver. Also adds an upfront check for missing Start Challenge, On the other side, and Challenge Completed screenshot examples (unless optional Tesseract OCR is available). Empty scans now show a detailed report of ACTUALLY detected screen events with timestamps instead of an empty chamber table. Side-switch screenshot matching is improved using bright UI text to reduce background mismatch. Preserves Full Run one-video export and local-only workflow. Passed 34 tests, Tk smoke and actual v0.3.12 updater install/rollback.'
+          fi
+          gh release edit v0.3.13 --repo "$GITHUB_REPOSITORY" --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_13_Update
+          path: /tmp/cazy313/out/Cazy_Studio_v0_3_13_Update.zip
+          if-no-files-found: error
