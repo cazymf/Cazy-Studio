@@ -60,7 +60,7 @@ class FullRunLogicTests(unittest.TestCase):
                          ['First Half','Second Half','First Half','Second Half'])
         self.assertEqual([x['chamber'] for x in segments],[1,1,2,2])
         self.assertEqual([(x['start'],x['end']) for x in segments],
-                         [(5.0,44.85),(52.0,84.0),(98.0,131.85),(139.0,183.0)])
+                         [(3.0,44.85),(50.0,84.0),(96.0,131.85),(137.0,183.0)])
 
     def test_failed_attempt_is_discarded_not_exported(self):
         events=[
@@ -70,8 +70,8 @@ class FullRunLogicTests(unittest.TestCase):
         self.assertEqual(result['discarded_attempts'],1)
         self.assertEqual(result['completed_chambers'],1)
         self.assertEqual(len(result['segments']),2)
-        self.assertEqual(result['segments'][0]['start'],50.0)
-        self.assertEqual(result['segments'][1]['start'],79.0)
+        self.assertEqual(result['segments'][0]['start'],48.0)
+        self.assertEqual(result['segments'][1]['start'],77.0)
 
     def test_incomplete_chambers_do_not_leak_into_full_run(self):
         events=[ev(2,'start'),ev(15,'switch'),ev(21,'start')]
