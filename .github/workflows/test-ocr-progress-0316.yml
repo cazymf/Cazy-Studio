@@ -1,0 +1,72 @@
+name: Validate v0.3.16 OCR Progress and Transition Detection
+on:
+  push:
+    branches: [fix/ocr-progress-detection-0316]
+    paths: ['source/**','tests/**','.github/workflows/test-ocr-progress-0316.yml']
+permissions:
+  contents: read
+jobs:
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install offline OCR, GUI, and media tooling
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg tesseract-ocr tesseract-ocr-eng
+      - name: Verify progress, OCR, full-run joining and GUI
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Build and apply ZIP using actual installed v0.3.15 updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy316/base /tmp/cazy316/stage /tmp/cazy316/out
+          gh release download v0.3.15 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_15_Update.zip' --dir /tmp/cazy316/base
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy316/stage/
+          PYTHONPATH=source python - <<'PY'
+          import tempfile,zipfile,importlib.util
+          from pathlib import Path
+          from update_core import build_update_zip
+          root=Path('/tmp/cazy316')
+          previous=root/'base/Cazy_Studio_v0_3_15_Update.zip'
+          update=root/'out/Cazy_Studio_v0_3_16_Update.zip'
+          manifest=build_update_zip(root/'stage',update,'0.3.16')
+          approved={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          assert set(manifest['files'])==approved
+          with tempfile.TemporaryDirectory() as location:
+              folder=Path(location)
+              old_module=folder/'legacy.py'
+              with zipfile.ZipFile(previous) as z:
+                  old_module.write_bytes(z.read('update_core.py'))
+              spec=importlib.util.spec_from_file_location('legacy_updater',old_module)
+              legacy=importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(legacy)
+              assert approved.issubset(legacy.SAFE_FILES)
+              assert set(legacy.inspect_update_zip(update,'0.3.16')['files'])==approved
+              installed=folder/'installation'
+              installed.mkdir()
+              with zipfile.ZipFile(previous) as z:
+                  old_manifest=legacy.inspect_update_zip(previous,'0.3.15')
+                  for filename in old_manifest['files']:
+                      (installed/filename).write_bytes(z.read(filename))
+              legacy.apply_update_zip(update,installed,'0.3.16')
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.16'"
+              assert 'SCAN STATUS: Ready' in (installed/'app.py').read_text()
+              legacy.rollback_latest(installed)
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.15'"
+          print('v0.3.15 updater installed/rolled back v0.3.16: PASS')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_16_PREVIEW
+          path: /tmp/cazy316/out/Cazy_Studio_v0_3_16_Update.zip
+          if-no-files-found: error

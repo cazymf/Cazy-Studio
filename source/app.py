@@ -44,7 +44,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.15  |  Silent OCR')
+        self.title('Cazy Studio v0.3.16  |  OCR Scan Progress')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
@@ -154,7 +154,7 @@ class Studio(tk.Tk):
         toolbar.pack_propagate(False)
         tk.Label(toolbar,text='CAZY',bg=BG,fg=ACCENT,font=('Segoe UI',22,'bold')).pack(side='left')
         tk.Label(toolbar,text='STUDIO',bg=BG,fg=TEXT,font=('Segoe UI',22,'bold')).pack(side='left',padx=(5,22))
-        tk.Label(toolbar,text='v0.3.11',bg=BG,fg=MUTED,font=('Segoe UI',9)).pack(side='left',padx=(0,12))
+        tk.Label(toolbar,text='v0.3.16',bg=BG,fg=MUTED,font=('Segoe UI',9)).pack(side='left',padx=(0,12))
         self._button(toolbar,'EDITOR',self.show_editor,small=True).pack(side='left',padx=(0,5))
         self._button(toolbar,'✦ AUTODIRECTOR',self.open_autodirector,True,small=True).pack(side='left')
         self._button(toolbar,'Export MP4  ↗',self.export_dialog).pack(side='right',padx=(8,0))
@@ -1159,6 +1159,12 @@ class AutoDirectorView(tk.Frame):
         self._auto_cancel = threading.Event()
         self._review_window = None
         self.status_var = tk.StringVar(value='Ready. Choose the exact recordings you want AutoDirector to use.')
+        self.scan_progress_var = tk.DoubleVar(value=0.0)
+        self.scan_state_var = tk.StringVar(value='SCAN STATUS: Ready')
+        self.scan_detail_var = tk.StringVar(value='When scanning, live progress, current video time and triggers appear here.')
+        self._scan_started = None
+        self._scan_last_update = None
+        self._scan_last_fraction = 0.0
         self.detail_var = tk.StringVar(value='Select a recording to see its location and preview it.')
         self._make_view()
         self.refresh()
@@ -1253,6 +1259,23 @@ class AutoDirectorView(tk.Frame):
         tk.Label(library, textvariable=self.detail_var, bg=CARD,
                  fg=MUTED, anchor='w', font=('Segoe UI', 9),
                  wraplength=650, justify='left').pack(fill='x', padx=14, pady=(0, 9))
+
+        # Keep the actual scan progress directly ABOVE the scan button,
+        # not inside the app-level footer which is often off-screen.
+        progress_panel = tk.Frame(library, bg=CARD2, highlightbackground=BORDER,
+                                  highlightthickness=1)
+        progress_panel.pack(fill='x', padx=14, pady=(0, 8))
+        tk.Label(progress_panel, textvariable=self.scan_state_var, bg=CARD2,
+                 fg=ACCENT2, font=('Segoe UI', 10, 'bold'),
+                 anchor='w').pack(fill='x', padx=10, pady=(7, 3))
+        self.scan_bar = ttk.Progressbar(progress_panel, orient='horizontal',
+                                        mode='determinate', maximum=100,
+                                        variable=self.scan_progress_var)
+        self.scan_bar.pack(fill='x', padx=10, pady=(0, 4), ipady=2)
+        tk.Label(progress_panel, textvariable=self.scan_detail_var, bg=CARD2,
+                 fg=TEXT, font=('Segoe UI', 9), anchor='w',
+                 justify='left', wraplength=850).pack(fill='x', padx=10,
+                                                      pady=(0, 8))
 
         bottom = tk.Frame(library, bg=CARD)
         bottom.pack(fill='x', padx=14, pady=(0, 14))
@@ -1593,13 +1616,39 @@ class AutoDirectorView(tk.Frame):
             while True:
                 event, data = self._auto_messages.get_nowait()
                 if event == 'progress':
-                    self.status_var.set(f'Local fight scan: {100*data:.0f}%')
+                    fraction=max(0.,min(1.,float(data)))
+                    self.scan_progress_var.set(fraction*100.)
+                    if self._auto_busy:
+                        self.scan_state_var.set(f'SCANNING: {fraction*100.:.1f}%')
+                    self.status_var.set(f'Local fight scan: {fraction*100:.1f}%')
+                elif event == 'scan_detail':
+                    fraction=max(0.,min(1.,float(data.get('fraction',0.))))
+                    elapsed=max(.001,time.monotonic()-(self._scan_started or time.monotonic()))
+                    eta=elapsed*(1.-fraction)/fraction if fraction>.015 else None
+                    remaining=(f'{int(eta//60)}m {int(eta%60):02d}s remaining'
+                               if eta is not None else 'Calculating ETA…')
+                    self.scan_progress_var.set(fraction*100.)
+                    self.scan_state_var.set(f'SCANNING — {fraction*100.:.1f}%  |  {remaining}')
+                    self.scan_detail_var.set(
+                        f'Video {data["video_index"]}/{data["total_videos"]}: '
+                        f'{data["filename"]}   •   '
+                        f'{data["at"]:.1f}s / {data["duration"]:.1f}s   •   '
+                        f'Events found: {data["found"]}')
+                    self.status_var.set(self.scan_state_var.get())
                 elif event == 'scan_done':
                     self._auto_busy = False
                     self.status_var.set(f'Found {len(data["candidates"])} possible result screens. Review suggested times.')
                     self.review_results(data)
                 elif event == 'fullrun_done':
                     self._auto_busy = False
+                    self.scan_progress_var.set(100.)
+                    self.scan_state_var.set('SCAN COMPLETE — 100%')
+                    counts=data.get('event_counts',{})
+                    self.scan_detail_var.set(
+                        f'Actual OCR events: Start {counts.get("start",0)}  •  '
+                        f'Other Side {counts.get("switch",0)}  •  '
+                        f'Completed {counts.get("complete",0)}  •  '
+                        f'Failed {counts.get("failure",0)}')
                     self._full_run_result = data
                     self.status_var.set(
                         f'Found {data["completed_chambers"]} completed chambers / '
@@ -1616,6 +1665,8 @@ class AutoDirectorView(tk.Frame):
                         '\n\nNothing was uploaded.', parent=self)
                 elif event == 'error':
                     self._auto_busy = False
+                    self.scan_state_var.set('SCAN / RENDER STOPPED')
+                    self.scan_detail_var.set(str(data))
                     self.status_var.set('AutoDirector: ' + str(data))
                     messagebox.showerror('AutoDirector', str(data), parent=self)
         except queue.Empty:
@@ -1753,6 +1804,8 @@ class AutoDirectorView(tk.Frame):
     def cancel_full_run_job(self):
         if self._auto_busy:
             self._auto_cancel.set()
+            self.scan_state_var.set('CANCELLING SCAN / RENDER…')
+            self.scan_detail_var.set('Stopping the current operation.')
             self.status_var.set('Cancelling AutoDirector operation…')
 
 
@@ -1877,12 +1930,18 @@ class AutoDirectorView(tk.Frame):
             return
         self._auto_busy=True
         self._auto_cancel.clear()
+        self._scan_started=time.monotonic()
+        self._scan_last_fraction=0.
+        self.scan_progress_var.set(0.)
+        self.scan_state_var.set('SCANNING — 0.0%  |  Preparing video…')
+        self.scan_detail_var.set(f'Starting OCR scan of {len(paths)} selected recording(s).')
         self.status_var.set(f'Scanning ALL {len(paths)} selected recording(s) in queue order…')
         def work():
             try:
                 result=autodirector_fullrun.scan_full_run(
                     paths,{},ocr_path=executable,cancel=self._auto_cancel,
-                    progress=lambda n:self._auto_messages.put(('progress',n)))
+                    progress=lambda n:self._auto_messages.put(('progress',n)),
+                    detail=lambda info:self._auto_messages.put(('scan_detail',info)))
                 self._auto_messages.put(('fullrun_done',result))
             except Exception as exc:
                 self._auto_messages.put(('error',str(exc)))

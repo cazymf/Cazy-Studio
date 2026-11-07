@@ -107,7 +107,7 @@ class AutoDirectorTests(unittest.TestCase):
         self.assertIn('No YouTube connection or publishing', ui)
 
     def test_version_bump_and_valid_python_ast(self):
-        self.assertIn("'0.3.15'", VERSION.read_text(encoding='utf-8'))
+        self.assertIn("'0.3.16'", VERSION.read_text(encoding='utf-8'))
         ast.parse(SOURCE.read_text(encoding='utf-8'))
 
 
