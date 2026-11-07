@@ -1,11 +1,5 @@
 name: Publish Cazy Studio v0.3.7 Selected Video Library
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/publish-v0.3.7-video-library.yml'
-      - 'source/app.py'
-      - 'source/version.py'
   workflow_dispatch:
 permissions:
   contents: write
