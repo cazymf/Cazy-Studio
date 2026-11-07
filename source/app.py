@@ -19,6 +19,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 import engine
 import quality_engine
 import quality_ui
+import autodirector_fullrun
 import update_center
 import engine as preview_tools
 from preview_worker import PreviewDecoder
@@ -43,7 +44,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.10  |  Real-ESRGAN Correction')
+        self.title('Cazy Studio v0.3.11  |  AutoDirector Full Run')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
@@ -153,7 +154,7 @@ class Studio(tk.Tk):
         toolbar.pack_propagate(False)
         tk.Label(toolbar,text='CAZY',bg=BG,fg=ACCENT,font=('Segoe UI',22,'bold')).pack(side='left')
         tk.Label(toolbar,text='STUDIO',bg=BG,fg=TEXT,font=('Segoe UI',22,'bold')).pack(side='left',padx=(5,22))
-        tk.Label(toolbar,text='v0.3.10',bg=BG,fg=MUTED,font=('Segoe UI',9)).pack(side='left',padx=(0,12))
+        tk.Label(toolbar,text='v0.3.11',bg=BG,fg=MUTED,font=('Segoe UI',9)).pack(side='left',padx=(0,12))
         self._button(toolbar,'EDITOR',self.show_editor,small=True).pack(side='left',padx=(0,5))
         self._button(toolbar,'✦ AUTODIRECTOR',self.open_autodirector,True,small=True).pack(side='left')
         self._button(toolbar,'Export MP4  ↗',self.export_dialog).pack(side='right',padx=(8,0))
@@ -1011,6 +1012,7 @@ def _autodirector_defaults():
         'schema': 1, 'queue': [], 'music_folder': '', 'random_music': True,
         'avoid_repeats': True, 'mode': _AUTODIRECTOR_MODES[0],
         'visibility': 'Private', 'render_preset': '', 'recent_music': '', 'success_reference': '',
+        'references': {},
     }
 
 
@@ -1030,6 +1032,8 @@ def _autodirector_validate(state):
         raise ValueError('Invalid render preset')
     if not isinstance(state.get('success_reference', ''), str) or len(state.get('success_reference', '')) > 4096:
         raise ValueError('Invalid completion screenshot path')
+    autodirector_fullrun.normalize_references(state.get('references',{}),
+                                                 state.get('success_reference',''))
     if not isinstance(state.get('recent_music'), str) or len(state['recent_music']) > 4096:
         raise ValueError('Invalid previously selected song')
     if not isinstance(state.get('random_music'), bool) or not isinstance(state.get('avoid_repeats'), bool):
@@ -1133,6 +1137,7 @@ class AutoDirectorView(tk.Frame):
         self.random_var = tk.BooleanVar(value=self.state['random_music'])
         self.avoid_var = tk.BooleanVar(value=self.state['avoid_repeats'])
         self.preset_var = tk.StringVar(value=self.state.get('render_preset', ''))
+        self._full_run_result = None
         self._auto_busy = False
         self._auto_messages = queue.Queue()
         self._auto_cancel = threading.Event()
@@ -1235,10 +1240,11 @@ class AutoDirectorView(tk.Frame):
 
         bottom = tk.Frame(library, bg=CARD)
         bottom.pack(fill='x', padx=14, pady=(0, 14))
-        self._label(bottom, 'Local beta detector  •  review each result',
+        self._label(bottom, 'Full Run = every half joined into one video',
                     9, MUTED).pack(side='left', pady=8)
-        self._button(bottom, 'SCAN SELECTED VIDEO', self.scan_selected, True).pack(side='right')
+        self._button(bottom, 'SCAN / REVIEW RUN', self.scan_selected, True).pack(side='right')
         self._button(bottom, 'Assign Music', self.prepare).pack(side='right', padx=(0, 7))
+        self._button(bottom, 'Cancel Job', self.cancel_full_run_job).pack(side='right', padx=(0, 7))
 
         self._label(options, '2  EDITING PLAN', 13, ACCENT2, True).pack(
             anchor='w', padx=15, pady=(16, 5))
@@ -1246,6 +1252,7 @@ class AutoDirectorView(tk.Frame):
             anchor='w', padx=15, pady=(0, 4))
         self._combo(options, self.mode_var, _AUTODIRECTOR_MODES).pack(
             fill='x', padx=15, pady=(0, 7))
+        self._label(options, 'Full Run joins ALL successful halves into ONE MP4.', 9, ACCENT2).pack(anchor='w', padx=15, pady=(0, 7))
         self._label(options, 'Fight detection is experimental — cuts require review.',
                     9, YELLOW).pack(anchor='w', padx=15, pady=(0, 12))
 
@@ -1275,9 +1282,9 @@ class AutoDirectorView(tk.Frame):
         self._button(options, 'Reload Saved Presets', self.reload_presets).pack(anchor='w', padx=15, pady=(0, 4))
         self.preset_hint = self._label(options, 'Loading named presets...', 9, MUTED)
         self.preset_hint.pack(anchor='w', padx=15, pady=(0, 9))
-        self._label(options, 'DETECTION EXAMPLE (OPTIONAL)', 11, ACCENT2, True).pack(anchor='w', padx=15, pady=(0, 5))
-        self._button(options, 'Choose Success Screenshot', self.choose_success_reference).pack(anchor='w', padx=15)
-        self.reference_hint = self._label(options, 'No example screenshot', 9, MUTED)
+        self._label(options, 'ABYSS DETECTION REFERENCES', 11, ACCENT2, True).pack(anchor='w', padx=15, pady=(0, 5))
+        self._button(options, 'Manage Multiple Screenshots', self.manage_references).pack(anchor='w', padx=15)
+        self.reference_hint = self._label(options, 'Start / Other Side / Completed', 9, MUTED)
         self.reference_hint.pack(anchor='w', padx=15, pady=(4, 8))
 
         review = tk.Frame(options, bg=CARD2)
@@ -1294,7 +1301,7 @@ class AutoDirectorView(tk.Frame):
 
         footer = tk.Frame(self, bg=BG)
         footer.pack(fill='x', padx=18, pady=(0, 12))
-        self._label(footer, 'BETA: detect result screens, edit times, render video + thumbnail + title locally. No uploads.',
+        self._label(footer, 'FULL RUN: scan selected recordings → review chamber halves → ONE finished MP4. No uploads.',
                     9, ACCENT2, True).pack(anchor='w')
         tk.Label(footer, textvariable=self.status_var, bg=BG, fg=MUTED,
                  anchor='w', font=('Segoe UI', 9), wraplength=1150,
@@ -1344,8 +1351,10 @@ class AutoDirectorView(tk.Frame):
         if self.preset_var.get() not in names:
             self.preset_var.set(names[0])
         self.preset_hint.configure(text=f'{len(names)-1} saved Quality Lab presets')
-        example = self.state.get('success_reference', '')
-        self.reference_hint.configure(text=Path(example).name if example else 'No example screenshot')
+        references = autodirector_fullrun.normalize_references(
+            self.state.get('references',{}),self.state.get('success_reference',''))
+        self.reference_hint.configure(text='  •  '.join(
+            f'{key}: {len(references[key])}' for key in ('start','switch','complete')))
         self._update_details()
 
     def _selected(self):
@@ -1517,6 +1526,9 @@ class AutoDirectorView(tk.Frame):
             self.status_var.set('Example success screenshot selected for future scans.')
 
     def scan_selected(self):
+        if self.mode_var.get() == 'Full Run':
+            self.scan_entire_full_run()
+            return
         selected = self._selected()
         if selected < 0:
             messagebox.showinfo('Select a video', 'Select one of your videos first.', parent=self)
@@ -1536,7 +1548,7 @@ class AutoDirectorView(tk.Frame):
             return
         self._auto_busy = True
         self._auto_cancel.clear()
-        self.status_var.set('Scanning selected video for Genshin results…')
+        self.status_var.set('Scanning for Genshin challenge transitions…')
 
         def background():
             try:
@@ -1559,6 +1571,13 @@ class AutoDirectorView(tk.Frame):
                     self._auto_busy = False
                     self.status_var.set(f'Found {len(data["candidates"])} possible result screens. Review suggested times.')
                     self.review_results(data)
+                elif event == 'fullrun_done':
+                    self._auto_busy = False
+                    self._full_run_result = data
+                    self.status_var.set(
+                        f'Found {data["completed_chambers"]} completed chambers / '
+                        f'{len(data["segments"])} halves. Review before ONE-video export.')
+                    self.review_full_run(data)
                 elif event == 'render_progress':
                     pct, step = data
                     self.status_var.set(f'Local rendering: {pct:.0f}% — {step}')
@@ -1703,6 +1722,289 @@ class AutoDirectorView(tk.Frame):
         threading.Thread(target=background,daemon=True).start()
         if self._review_window is not None and self._review_window.winfo_exists():
             self._review_window.destroy()
+
+    def cancel_full_run_job(self):
+        if self._auto_busy:
+            self._auto_cancel.set()
+            self.status_var.set('Cancelling AutoDirector operation…')
+
+
+    def manage_references(self):
+        """Manage multiple screenshots independently for each Abyss event."""
+        from tkinter import simpledialog
+        refs=autodirector_fullrun.normalize_references(
+            self.state.get('references',{}),self.state.get('success_reference',''))
+        window=tk.Toplevel(self)
+        window.title('Abyss Detection — Reference Screenshots')
+        window.geometry('780x550')
+        window.minsize(620,430)
+        window.configure(bg=BG)
+        body=tk.Frame(window,bg=BG)
+        body.pack(fill='both',expand=True,padx=18,pady=16)
+        self._label(body,'REFERENCE SCREENSHOT LIBRARY',15,ACCENT2,True).pack(anchor='w')
+        self._label(body,'Add multiple examples of each game event. None are uploaded.',
+                    9,MUTED).pack(anchor='w',pady=(4,10))
+        kind_var=tk.StringVar(value='start')
+        choices={v:k for k,v in autodirector_fullrun.REFERENCE_KINDS.items()}
+        dropdown=ttk.Combobox(body,textvariable=kind_var,
+                               values=list(choices),state='readonly',
+                               style='Field.TCombobox')
+        dropdown.pack(fill='x',pady=(0,8))
+        kind_var.set(autodirector_fullrun.REFERENCE_KINDS['start'])
+        listbox=tk.Listbox(body,bg=CARD2,fg=TEXT,selectbackground=ACCENT,
+                           selectforeground=BG,relief='flat',font=('Segoe UI',10))
+        listbox.pack(fill='both',expand=True)
+        status=self._label(body,'',9,MUTED)
+        status.pack(anchor='w',pady=7)
+        def current_kind():
+            return choices[kind_var.get()]
+        def refresh():
+            listbox.delete(0,tk.END)
+            for item in refs[current_kind()]:
+                listbox.insert(tk.END,Path(item).name)
+            status.configure(text=f'{len(refs[current_kind()])} image(s) for {kind_var.get()}')
+        dropdown.bind('<<ComboboxSelected>>',lambda event:refresh())
+        def add():
+            images=filedialog.askopenfilenames(
+                parent=window,title='Add examples for '+kind_var.get(),
+                filetypes=[('Screenshots','*.png *.jpg *.jpeg *.bmp'),
+                           ('All files','*.*')])
+            selected=refs[current_kind()]
+            seen={os.path.normcase(os.path.abspath(x)) for x in selected}
+            for name in images:
+                full=str(Path(name).resolve())
+                if os.path.normcase(os.path.abspath(full)) not in seen:
+                    if len(selected)>=autodirector_fullrun.REFERENCE_LIMIT:
+                        break
+                    selected.append(full)
+                    seen.add(os.path.normcase(os.path.abspath(full)))
+            refresh()
+        def remove():
+            for index in reversed(listbox.curselection()):
+                refs[current_kind()].pop(index)
+            refresh()
+        def commit():
+            self.state['references']=refs
+            # Legacy single-image path must not re-add removed screenshots.
+            self.state['success_reference']=''
+            if self.save():
+                self.refresh()
+                window.destroy()
+        buttons=tk.Frame(body,bg=BG)
+        buttons.pack(fill='x',pady=(8,0))
+        self._button(buttons,'+ Add Screenshots',add,True).pack(side='left',padx=(0,7))
+        self._button(buttons,'Remove Selected',remove).pack(side='left')
+        self._button(buttons,'SAVE ALL REFERENCES',commit,True).pack(side='right')
+        refresh()
+
+    def scan_entire_full_run(self):
+        if self._auto_busy:
+            messagebox.showinfo('AutoDirector busy','Another scan/render is running.',parent=self)
+            return
+        jobs=list(self.state['queue'])
+        if not jobs:
+            messagebox.showinfo('Full Run','Click + ADD VIDEOS first.',parent=self)
+            return
+        paths=[job['path'] for job in jobs]
+        missing=[Path(p).name for p in paths if not Path(p).is_file()]
+        if missing:
+            messagebox.showerror('Missing videos','Re-add these recordings:\n' +
+                                 '\n'.join(missing),parent=self)
+            return
+        if not self.save():
+            return
+        refs=autodirector_fullrun.normalize_references(
+            self.state.get('references',{}),self.state.get('success_reference',''))
+        self._auto_busy=True
+        self._auto_cancel.clear()
+        self.status_var.set(f'Scanning ALL {len(paths)} selected recording(s) in queue order…')
+        def work():
+            try:
+                result=autodirector_fullrun.scan_full_run(
+                    paths,refs,cancel=self._auto_cancel,
+                    progress=lambda n:self._auto_messages.put(('progress',n)))
+                self._auto_messages.put(('fullrun_done',result))
+            except Exception as exc:
+                self._auto_messages.put(('error',str(exc)))
+        threading.Thread(target=work,daemon=True).start()
+
+    def review_full_run(self,result):
+        if self._review_window is not None and self._review_window.winfo_exists():
+            self._review_window.destroy()
+        win=tk.Toplevel(self)
+        self._review_window=win
+        win.title('AutoDirector — Full Run: All Chambers, One Video')
+        win.geometry('1150x700')
+        win.minsize(850,530)
+        win.configure(bg=BG)
+        body=tk.Frame(win,bg=BG)
+        body.pack(fill='both',expand=True,padx=18,pady=16)
+        self._label(body,'FULL RUN  •  ONE FINISHED VIDEO',16,ACCENT2,True).pack(anchor='w')
+        summary=f'{result["completed_chambers"]} completed chamber(s) | {len(result["segments"])} half-clips | {len(result["reports"])} recording(s)'
+        self._label(body,summary,10,TEXT,True).pack(anchor='w',pady=(7,3))
+        self._label(body,'Review the cut boundaries. Disable anything incorrect. '
+                         'All enabled halves will be JOINED in order into ONE MP4.',
+                    9,YELLOW).pack(anchor='w',pady=(0,10))
+        table=ttk.Treeview(body,columns=('use','chamber','side','video','start','end','evidence'),
+                           show='headings',selectmode='browse',height=13)
+        for field,label,width in (
+            ('use','USE',55),('chamber','CHAMBER',83),('side','SIDE',125),
+            ('video','RECORDING',175),('start','START',85),('end','END',85),
+            ('evidence','DETECTION',330)):
+            table.heading(field,text=label)
+            table.column(field,width=width,anchor='w')
+        table.pack(fill='both',expand=True)
+        segments=[dict(seg) for seg in result['segments']]
+        for i,seg in enumerate(segments):
+            table.insert('',tk.END,iid=str(i),values=(
+                'YES' if seg.get('enabled',True) else 'NO',
+                seg['chamber'],seg['side'],Path(seg['path']).name,
+                f'{seg["start"]:.2f}',f'{seg["end"]:.2f}',seg.get('evidence','manual')))
+        fields=tk.Frame(body,bg=BG)
+        fields.pack(fill='x',pady=(11,8))
+        start=tk.StringVar()
+        end=tk.StringVar()
+        self._label(fields,'START (sec)',9,TEXT,True).pack(side='left')
+        tk.Entry(fields,width=12,bg=CARD2,fg=TEXT,insertbackground=TEXT,
+                 textvariable=start).pack(side='left',padx=(6,14),ipady=7)
+        self._label(fields,'END (sec)',9,TEXT,True).pack(side='left')
+        tk.Entry(fields,width=12,bg=CARD2,fg=TEXT,insertbackground=TEXT,
+                 textvariable=end).pack(side='left',padx=(6,14),ipady=7)
+        detail=tk.StringVar(value='Select a half to edit the start/end times')
+        tk.Label(body,textvariable=detail,fg=MUTED,bg=BG,anchor='w',
+                 font=('Segoe UI',9)).pack(fill='x',pady=(0,9))
+        def selected_index():
+            rows=table.selection()
+            return int(rows[0]) if rows else None
+        def choose(_event=None):
+            i=selected_index()
+            if i is None:return
+            item=segments[i]
+            start.set(str(item['start']))
+            end.set(str(item['end']))
+            detail.set(f'Chamber {item["chamber"]} {item["side"]}  •  {item["path"]}')
+        table.bind('<<TreeviewSelect>>',choose)
+        def update_row(i):
+            seg=segments[i]
+            table.item(str(i),values=(
+                'YES' if seg.get('enabled',True) else 'NO',seg['chamber'],
+                seg['side'],Path(seg['path']).name,
+                f'{seg["start"]:.2f}',f'{seg["end"]:.2f}',
+                seg.get('evidence','manual')))
+        def apply_times():
+            i=selected_index()
+            if i is None:return False
+            try:
+                a,b=float(start.get()),float(end.get())
+                if not (0<=a<b):raise ValueError('Start must be before end')
+                segments[i]['start']=a
+                segments[i]['end']=b
+                update_row(i)
+                return True
+            except ValueError as exc:
+                messagebox.showerror('Invalid cut',str(exc),parent=win)
+                return False
+        def toggle():
+            i=selected_index()
+            if i is None:return
+            segments[i]['enabled']=not segments[i].get('enabled',True)
+            update_row(i)
+        def preview():
+            i=selected_index()
+            if i is not None:self._open_auto_source(segments[i]['path'])
+        def add_manual():
+            if len(segments)>=autodirector_fullrun.SEGMENT_MAX:
+                messagebox.showerror('Full Run','Too many segments',parent=win)
+                return
+            dialog=tk.Toplevel(win)
+            dialog.configure(bg=BG)
+            dialog.title('Add Half Manually')
+            dialog.geometry('520x290')
+            panel=tk.Frame(dialog,bg=BG)
+            panel.pack(fill='both',expand=True,padx=14,pady=14)
+            files=[job['path'] for job in self.state['queue'] if Path(job['path']).is_file()]
+            names=[Path(x).name for x in files]
+            selection=tk.StringVar(value=names[0] if names else '')
+            self._label(panel,'Recording',9,TEXT,True).pack(anchor='w')
+            cb=ttk.Combobox(panel,state='readonly',values=names,textvariable=selection)
+            cb.pack(fill='x',pady=5)
+            a=tk.StringVar(value='0')
+            b=tk.StringVar(value='10')
+            side=tk.StringVar(value='First Half')
+            self._label(panel,'Side',9,TEXT,True).pack(anchor='w')
+            ttk.Combobox(panel,state='readonly',values=['First Half','Second Half'],
+                         textvariable=side).pack(fill='x',pady=5)
+            row=tk.Frame(panel,bg=BG)
+            row.pack(fill='x',pady=8)
+            tk.Entry(row,textvariable=a,width=10).pack(side='left')
+            tk.Entry(row,textvariable=b,width=10).pack(side='left',padx=7)
+            def commit_manual():
+                try:
+                    index=names.index(selection.get())
+                    x,y=float(a.get()),float(b.get())
+                    if not(0<=x<y):raise ValueError('Bad timestamps')
+                    seg={'path':files[index],'chamber':result['completed_chambers']+1,
+                         'side':side.get(),'start':x,'end':y,'enabled':True,
+                         'evidence':'Manual (reviewed)'}
+                    segments.append(seg)
+                    i=len(segments)-1
+                    table.insert('',tk.END,iid=str(i))
+                    update_row(i)
+                    table.selection_set(str(i))
+                    choose()
+                    dialog.destroy()
+                except (ValueError,IndexError) as exc:
+                    messagebox.showerror('Manual half',str(exc),parent=dialog)
+            self._button(panel,'ADD HALF',commit_manual,True).pack(anchor='e',pady=5)
+        def export():
+            i=selected_index()
+            if i is not None and start.get() and end.get():
+                if not apply_times():
+                    return
+            try:
+                accepted=autodirector_fullrun.validate_full_run_segments(segments)
+                prefs=quality_engine.load_preferences()
+                preset=self.preset_var.get()
+                if preset and preset!='Use last-used settings' and preset not in prefs['presets']:
+                    raise ValueError('Saved preset not found. Reload saved presets.')
+            except (ValueError,OSError) as exc:
+                messagebox.showerror('Full Run',str(exc),parent=win)
+                return
+            folder=filedialog.askdirectory(parent=win,title='Where should the ONE finished Full Run video go?')
+            if not folder:return
+            if not messagebox.askyesno('Export ONE Full Run',
+                f'Join {len(accepted)} halves from {len(set(x["path"] for x in accepted))} recordings.\n'
+                f'Preset: {preset or "Use last-used settings"}\n'
+                f'ONE finished MP4 + thumbnail + title.\n\n'
+                'Render now? Your original files will remain untouched.',
+                parent=win):
+                return
+            music=next((j.get('music','') for j in self.state['queue']
+                        if j.get('music')), '')
+            self._auto_busy=True
+            self._auto_cancel.clear()
+            def work():
+                try:
+                    output=autodirector_fullrun.render_full_run(
+                        accepted,folder,preset,music=music,cancel=self._auto_cancel,
+                        progress=lambda pct,label:
+                        self._auto_messages.put(('render_progress',(pct,label))))
+                    self._auto_messages.put(('render_done',output))
+                except Exception as exc:
+                    self._auto_messages.put(('error',str(exc)))
+            threading.Thread(target=work,daemon=True).start()
+            win.destroy()
+        buttons=tk.Frame(body,bg=BG)
+        buttons.pack(fill='x',pady=8)
+        self._button(buttons,'Apply Times',apply_times).pack(side='left',padx=(0,6))
+        self._button(buttons,'Enable / Disable',toggle).pack(side='left',padx=(0,6))
+        self._button(buttons,'Preview Source',preview).pack(side='left',padx=(0,6))
+        self._button(buttons,'+ Manual Half',add_manual).pack(side='left')
+        self._button(buttons,'RENDER ONE FULL RUN',export,True).pack(side='right')
+        if segments:
+            table.selection_set('0')
+            choose()
+
 
 
 if __name__=='__main__':
