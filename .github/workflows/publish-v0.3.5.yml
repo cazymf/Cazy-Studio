@@ -1,0 +1,64 @@
+name: Publish Cazy Studio v0.3.5 render presets
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v0.3.5.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebuild verified render preset update
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PATCH_B64: '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'
+          EXPECTED_HASHES: '{"app.py":"8c008c0bf07dd0712e58c6c57524ef78a0925a2048c1f8138b0ff327fc8eba62","quality_engine.py":"6f254f7c43d4b4b43c977745aca0c83e510aa03a5b506c5f7a4b0a6b3cb364ea","quality_ui.py":"aa62b216c5b6d694d59332a12c049f6a46229f0b16085dbfe8bb87bbba766c02","update_core.py":"c421de76746732a9d22149f2e485ee8b98a44be9970447eb01306efe3aad9cd7","version.py":"e3443e7baf0254dce066447daac9e6c5fd22def6acf0aa82b5606e0e09e50f67"}'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cazy035"
+          cd "$RUNNER_TEMP/cazy035"
+          gh release download v0.3.4 --repo "$GITHUB_REPOSITORY" --pattern 'Cazy_Studio_v0_3_4_Update.zip'
+          python - <<'PY'
+          import os, zipfile, pathlib, hashlib, base64, zlib
+          expected_old = {
+           'app.py':'8d340d8a698f604a2f2a5bb1573ce94a817076b95c2e670204e545d241e0646c',
+           'quality_engine.py':'ef672bc87a407f458c1e2c0eee0c7a0c539fb33e5f42a36e49df89937bcacb38',
+           'quality_ui.py':'3e1e606c66d6cb530c87bf1dd424d186e68e45de6d2f8ba8545b449b3883d762',
+           'update_core.py':'d4b8ea5e9da3e4ed8d2fed65c37b85f28928b757ed1f7788ccda3b74a9c0cfbc',
+           'version.py':'c0a043decbf147d6bc5b53aa69fe7a1ad92b1f886895bb74e2948583f684b531'
+          }
+          with zipfile.ZipFile('Cazy_Studio_v0_3_4_Update.zip') as z:
+           for name, sha in expected_old.items():
+            data=z.read(name)
+            assert hashlib.sha256(data).hexdigest()==sha,(name,'old checksum mismatch')
+            pathlib.Path(name).write_bytes(data)
+          pathlib.Path('changes.patch').write_bytes(zlib.decompress(base64.b64decode(os.environ['PATCH_B64'])))
+          PY
+          patch -p1 --batch -i changes.patch
+          python - <<'PY'
+          import json,os,hashlib,zipfile,pathlib
+          expected=json.loads(os.environ['EXPECTED_HASHES'])
+          for name,sha in expected.items():
+           assert hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()==sha,(name,'new checksum mismatch')
+          manifest={'product':'CazyStudio','format':1,'version':'0.3.5','files':expected}
+          with zipfile.ZipFile('Cazy_Studio_v0_3_5_Update.zip','w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+           for name in expected:z.write(name,name)
+           z.writestr('update_manifest.json',json.dumps(manifest,indent=2))
+          with zipfile.ZipFile('Cazy_Studio_v0_3_5_Update.zip') as z:
+           assert json.loads(z.read('update_manifest.json'))['version']=='0.3.5'
+          print('Verified update ZIP',pathlib.Path('Cazy_Studio_v0_3_5_Update.zip').stat().st_size)
+          PY
+      - name: Publish latest GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy035"
+          if gh release view v0.3.5 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.5 Cazy_Studio_v0_3_5_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.5 Cazy_Studio_v0_3_5_Update.zip --repo "$GITHUB_REPOSITORY" --title 'Cazy Studio v0.3.5 — Saved Render Presets' --notes 'Adds Save, Load, Delete render presets and auto-restores last-used Quality Lab settings. Saves files in user AppData so future updates preserve presets. Clip trim is never saved in presets. Built and verified against the previous v0.3.4 release.'
+          fi
+          gh release edit v0.3.5 --repo "$GITHUB_REPOSITORY" --latest
