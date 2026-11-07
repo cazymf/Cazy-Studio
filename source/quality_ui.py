@@ -17,7 +17,7 @@ BG='#0b101c';CARD='#141d2d';CARD2='#1c273a';TEXT='#edf3ff';MUTED='#92a4bd';ACCEN
 class QualityLab(tk.Toplevel):
     def __init__(self, master, suggested_path=None, timeline_clip=None):
         super().__init__(master)
-        self.title('Cazy Studio • Quality Lab v0.3.9')
+        self.title('Cazy Studio • Quality Lab v0.3.10')
         self.geometry('1100x880')
         self.minsize(940,670)
         self.configure(bg=BG)
