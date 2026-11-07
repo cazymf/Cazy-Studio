@@ -144,15 +144,17 @@ def collapse_events(events, gap=5.0):
     """Collapse repeated frames of the SAME screen, retain unrelated events."""
     ordered=sorted(events,key=lambda event:float(event["at"]))
     result=[]
+    last_seen=float('-inf')
     for event in ordered:
-        if result and event["kind"]==result[-1]["kind"] and \
-                event["at"]-result[-1]["at"] <= gap:
+        at=float(event["at"])
+        if result and event["kind"]==result[-1]["kind"] and at-last_seen<=gap:
             if event.get("confidence",0)>result[-1].get("confidence",0):
-                # Preserve first appearance to avoid cutting off the initial trigger.
-                earlier=result[-1]["at"]
-                result[-1] = dict(event,at=earlier)
-            continue
-        result.append(dict(event))
+                # Preserve the FIRST on-screen appearance, not the last.
+                earliest=result[-1]["at"]
+                result[-1]=dict(event,at=earliest)
+        else:
+            result.append(dict(event))
+        last_seen=at
     return result
 
 
