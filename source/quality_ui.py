@@ -17,7 +17,7 @@ BG='#0b101c';CARD='#141d2d';CARD2='#1c273a';TEXT='#edf3ff';MUTED='#92a4bd';ACCEN
 class QualityLab(tk.Toplevel):
     def __init__(self, master, suggested_path=None, timeline_clip=None):
         super().__init__(master)
-        self.title('Cazy Studio • Quality Lab v0.3.5')
+        self.title('Cazy Studio • Quality Lab v0.3.9')
         self.geometry('1100x880')
         self.minsize(940,670)
         self.configure(bg=BG)
@@ -177,7 +177,7 @@ class QualityLab(tk.Toplevel):
         tk.Label(foot,textvariable=self.status,fg=TEXT,bg=BG,anchor='w',justify='left',wraplength=790).pack(side='left',fill='x',expand=True,pady=(3,0))
         self.button(foot,'Cancel Job',self.cancel_job).pack(side='right',padx=(9,0))
         self.progress_title=tk.StringVar(value='0%  •  Ready')
-        self.label(foot,'RENDER PROGRESS',ACCENT2,9,True).pack(anchor='w',pady=(9,0))
+        self.label(foot,'RENDER PROGRESS  •  Live processing FPS + ETA',ACCENT2,9,True).pack(anchor='w',pady=(9,0))
         tk.Label(foot,textvariable=self.progress_title,fg=GREEN,bg=BG,anchor='w',
                  font=('Segoe UI',10,'bold')).pack(fill='x',pady=(2,2))
         self.progress_bar=ttk.Progressbar(foot,orient='horizontal',mode='determinate',maximum=100)
