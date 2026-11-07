@@ -75,7 +75,7 @@ def classify_screen_text(text):
 # Cropping distinct overlays avoids matching moving monsters/backgrounds.
 REF_REGIONS = {
     "start": (0.54, 0.44, 0.83, 0.58),
-    "switch": (0.27, 0.39, 0.75, 0.54),
+    "switch": (0.27, 0.46, 0.75, 0.65),
     "complete": (0.29, 0.26, 0.73, 0.41),
     "failure": (0.29, 0.26, 0.73, 0.41),
     "blessing": (0.30, 0.03, 0.71, 0.14),
