@@ -1,0 +1,60 @@
+name: Validate AutoDirector v0.3.7 Video Library
+on:
+  push:
+    branches: [feature/autodirector-037-library]
+    paths:
+      - 'source/**'
+      - 'tests/**'
+      - '.github/workflows/test-autodirector-037.yml'
+permissions:
+  contents: read
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check syntax and video library regression tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Build updater-compatible v0.3.7 ZIP and test rollback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy-base release-staging output
+          gh release download v0.3.6 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_6_Update.zip' --dir /tmp/cazy-base
+          cp source/app.py source/update_core.py source/version.py release-staging/
+          PYTHONPATH=source python - <<'PY'
+          import json,zipfile,tempfile
+          from pathlib import Path
+          from update_core import build_update_zip,apply_update_zip,rollback_latest,inspect_update_zip
+          zip_path=Path('output/Cazy_Studio_v0_3_7_Update.zip').resolve()
+          new_manifest=build_update_zip('release-staging',zip_path,'0.3.7')
+          assert set(new_manifest['files'])=={'app.py','update_core.py','version.py'}
+          old_zip=Path('/tmp/cazy-base/Cazy_Studio_v0_3_6_Update.zip')
+          old_manifest=inspect_update_zip(old_zip,'0.3.6')
+          with tempfile.TemporaryDirectory() as folder:
+              root=Path(folder)
+              with zipfile.ZipFile(old_zip) as z:
+                  for filename in old_manifest['files']:
+                      (root/filename).write_bytes(z.read(filename))
+              state=apply_update_zip(zip_path,root,'0.3.7')
+              assert state['version']=='0.3.7'
+              assert (root/'version.py').read_text().strip()=="APP_VERSION = '0.3.7'"
+              assert (root/'app.py').read_bytes()==Path('source/app.py').read_bytes()
+              rollback_latest(root)
+              assert (root/'version.py').read_text().strip()=="APP_VERSION = '0.3.6'"
+              with zipfile.ZipFile(old_zip) as z:
+                  assert (root/'app.py').read_bytes()==z.read('app.py')
+          print('Package, installation and rollback: PASS')
+          print('Manifest:',json.dumps(new_manifest,indent=2))
+          PY
+      - name: Upload preview update ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_7_Update_PREVIEW
+          path: output/Cazy_Studio_v0_3_7_Update.zip
+          if-no-files-found: error
