@@ -1,0 +1,74 @@
+name: Publish Cazy Studio v0.3.10 Real-ESRGAN Grid Fix
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v0.3.10-realesrgan-grid-fix.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Real-ESRGAN native-scale and UI tests
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Create and validate updater package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cazy0310/base" "$RUNNER_TEMP/cazy0310/stage" "$RUNNER_TEMP/cazy0310/out"
+          gh release download v0.3.9 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_9_Update.zip' --dir "$RUNNER_TEMP/cazy0310/base"
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py "$RUNNER_TEMP/cazy0310/stage"
+          PYTHONPATH=source python - <<'PY'
+          from pathlib import Path
+          import os,tempfile,zipfile
+          from update_core import build_update_zip,inspect_update_zip,apply_update_zip,rollback_latest
+          root=Path(os.environ['RUNNER_TEMP'])/'cazy0310'
+          old=root/'base/Cazy_Studio_v0_3_9_Update.zip'
+          output=root/'out/Cazy_Studio_v0_3_10_Update.zip'
+          previous=inspect_update_zip(old,'0.3.9')
+          new=build_update_zip(root/'stage',output,'0.3.10')
+          assert set(new['files'])=={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          with tempfile.TemporaryDirectory() as folder:
+              install=Path(folder)
+              with zipfile.ZipFile(old) as archive:
+                  for filename in previous['files']:
+                      (install/filename).write_bytes(archive.read(filename))
+              apply_update_zip(output,install,'0.3.10')
+              assert (install/'quality_engine.py').read_bytes()==Path('source/quality_engine.py').read_bytes()
+              assert (install/'version.py').read_text().strip()=="APP_VERSION = '0.3.10'"
+              rollback_latest(install)
+              assert (install/'version.py').read_text().strip()=="APP_VERSION = '0.3.9'"
+          print('Verified v0.3.10 install and rollback')
+          PY
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy0310/out"
+          if gh release view v0.3.10 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.10 Cazy_Studio_v0_3_10_Update.zip \
+              --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.10 Cazy_Studio_v0_3_10_Update.zip \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.3.10 — Real-ESRGAN Render Grid Fix' \
+              --notes 'Fixes a probable cause of corrupted square-grid Real-ESRGAN General renders: the x4plus model was incorrectly invoked with 2x scale. General now uses its native 4x inference and the final video encoder downsamples to your selected output resolution. Anime remains native 2x. Validate first and last upscaled image dimensions before encoding, rejecting mismatched outputs rather than creating a damaged MP4. Existing saved presets, AutoDirector, GPU rendering, and local-only workflow are preserved. Passed 19 regression tests, UI smoke, and installer/rollback verification. Re-render affected files from the original source; already-corrupted frames are not repaired.'
+          fi
+          gh release edit v0.3.10 --repo "$GITHUB_REPOSITORY" --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_10_Update
+          path: ${{ runner.temp }}/cazy0310/out/Cazy_Studio_v0_3_10_Update.zip
