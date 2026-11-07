@@ -1244,6 +1244,7 @@ class AutoDirectorView(tk.Frame):
                     9, MUTED).pack(side='left', pady=8)
         self._button(bottom, 'SCAN / REVIEW RUN', self.scan_selected, True).pack(side='right')
         self._button(bottom, 'Assign Music', self.prepare).pack(side='right', padx=(0, 7))
+        self._button(bottom, 'Cancel Job', self.cancel_full_run_job).pack(side='right', padx=(0, 7))
 
         self._label(options, '2  EDITING PLAN', 13, ACCENT2, True).pack(
             anchor='w', padx=15, pady=(16, 5))
@@ -1722,6 +1723,12 @@ class AutoDirectorView(tk.Frame):
         if self._review_window is not None and self._review_window.winfo_exists():
             self._review_window.destroy()
 
+    def cancel_full_run_job(self):
+        if self._auto_busy:
+            self._auto_cancel.set()
+            self.status_var.set('Cancelling AutoDirector operation…')
+
+
     def manage_references(self):
         """Manage multiple screenshots independently for each Abyss event."""
         from tkinter import simpledialog
@@ -1886,15 +1893,17 @@ class AutoDirectorView(tk.Frame):
                 seg.get('evidence','manual')))
         def apply_times():
             i=selected_index()
-            if i is None:return
+            if i is None:return False
             try:
                 a,b=float(start.get()),float(end.get())
                 if not (0<=a<b):raise ValueError('Start must be before end')
                 segments[i]['start']=a
                 segments[i]['end']=b
                 update_row(i)
+                return True
             except ValueError as exc:
                 messagebox.showerror('Invalid cut',str(exc),parent=win)
+                return False
         def toggle():
             i=selected_index()
             if i is None:return
@@ -1950,7 +1959,8 @@ class AutoDirectorView(tk.Frame):
         def export():
             i=selected_index()
             if i is not None and start.get() and end.get():
-                apply_times()
+                if not apply_times():
+                    return
             try:
                 accepted=autodirector_fullrun.validate_full_run_segments(segments)
                 prefs=quality_engine.load_preferences()
