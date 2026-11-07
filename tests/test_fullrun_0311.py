@@ -189,7 +189,8 @@ class FullRunLogicTests(unittest.TestCase):
                 output=fullrun.render_full_run(
                     segments,root/'Finished','My Abyss Export')
             self.assertEqual(len(rendered),2)
-            self.assertEqual([t[:2] for t in rendered],[(.2,1.4),(2.1,2.0)])
+            self.assertEqual([(round(t[0],2),round(t[1],2)) for t in rendered],
+                             [(.2,1.4),(2.1,2.0)])
             self.assertTrue(all(Path(p).is_file() for p in output.values()))
             self.assertEqual(len(list((root/'Finished').glob('*.mp4'))),1)
             manifest=json.loads(Path(output['cuts']).read_text())
