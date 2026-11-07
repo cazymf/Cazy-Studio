@@ -48,7 +48,7 @@ ns = {
             resolution='1440p Landscape', fps=60, upscale='Real-ESRGAN Anime',
             frame_method='Native / Duplicate', encoder='Auto / NVIDIA NVENC',
             quality='Maximum'),
-        _cazy_tesseract=lambda: None),
+        _cazy_tesseract=lambda *args: None),
     'autodirector_fullrun': types.SimpleNamespace(
         normalize_references=lambda refs, old='': {
             k:list(refs.get(k,[])) for k in ('start','switch','complete','failure','blessing')},
@@ -100,7 +100,7 @@ with tempfile.TemporaryDirectory() as temp:
         try:
             view.scan_entire_full_run()
             assert not view._auto_busy
-            assert 'On the other side' in view.status_var.get()
+            assert 'Tesseract OCR' in view.status_var.get()
         finally:
             messagebox.askyesno=old_dialog
         # The Full Run review is a separate visible table containing BOTH halves.

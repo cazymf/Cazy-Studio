@@ -1,0 +1,90 @@
+name: Publish Cazy Studio v0.3.14 — Text OCR Abyss Full Run
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-ocr-abyss-0314.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install local OCR, UI and media test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg tesseract-ocr tesseract-ocr-eng
+      - name: Test OCR prompts, 2-second pre-roll, full-run export and GUI
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Verify update ZIP with installed v0.3.13 updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy314/base /tmp/cazy314/stage /tmp/cazy314/out
+          gh release download v0.3.13 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_13_Update.zip' --dir /tmp/cazy314/base
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy314/stage/
+          PYTHONPATH=source python - <<'PY'
+          import tempfile,zipfile,importlib.util
+          from pathlib import Path
+          from update_core import build_update_zip
+          root=Path('/tmp/cazy314')
+          old=root/'base/Cazy_Studio_v0_3_13_Update.zip'
+          update=root/'out/Cazy_Studio_v0_3_14_Update.zip'
+          manifest=build_update_zip(root/'stage',update,'0.3.14')
+          allowed={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          assert set(manifest['files'])==allowed
+          with tempfile.TemporaryDirectory() as d:
+              folder=Path(d)
+              oldmodule=folder/'legacy.py'
+              with zipfile.ZipFile(old) as z:
+                  oldmodule.write_bytes(z.read('update_core.py'))
+              spec=importlib.util.spec_from_file_location('legacy_updater',oldmodule)
+              legacy=importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(legacy)
+              assert allowed.issubset(legacy.SAFE_FILES)
+              assert set(legacy.inspect_update_zip(update,'0.3.14')['files'])==allowed
+              installed=folder/'installed'
+              installed.mkdir()
+              with zipfile.ZipFile(old) as z:
+                  prev=legacy.inspect_update_zip(old,'0.3.13')
+                  for name in prev['files']:
+                      (installed/name).write_bytes(z.read(name))
+              legacy.apply_update_zip(update,installed,'0.3.14')
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.14'"
+              assert 'def read_abyss_frame_text(' in (installed/'quality_engine.py').read_text()
+              assert 'first_start=max(0.,at-2.0)' in (installed/'quality_engine.py').read_text()
+              legacy.rollback_latest(installed)
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.13'"
+          print('v0.3.13 updater applied and rolled back v0.3.14: PASS')
+          PY
+      - name: Publish verified OCR Full Run update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /tmp/cazy314/out
+          if gh release view v0.3.14 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.14 Cazy_Studio_v0_3_14_Update.zip \
+              --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.14 Cazy_Studio_v0_3_14_Update.zip \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.3.14 — OCR Abyss Full Run and 2-Second Pre-Roll' \
+              --notes 'AutoDirector Full Run now reads real Genshin screen TEXT using fully offline Tesseract OCR instead of matching screenshot examples. It recognizes Start Challenge → On the other side → second Start Challenge → Challenge Completed, repeating across every completed chamber in your selected OBS recordings. Every half begins TWO SECONDS before its recognized Start Challenge (clamped at video start). Transition screens, retries and unfinished chambers stay out of the reviewed cut list; reviewed halves are combined into ONE final video using your saved Quality Lab render preset. Adds local Tesseract detection, Locate OCR and Install Help controls, an informative detected-event report, and no YouTube publishing. Tesseract OCR must be installed on Windows and can be selected in the application. Source files remain untouched. Passed 41 tests including actual Tesseract recognition of all three triggers, Full Run FFmpeg one-video export, GUI smoke and v0.3.13 updater installation/rollback verification. Actual Genshin gameplay accuracy remains beta and requires verification in your recordings.'
+          fi
+          gh release edit v0.3.14 --repo "$GITHUB_REPOSITORY" --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_14_Update
+          path: /tmp/cazy314/out/Cazy_Studio_v0_3_14_Update.zip
+          if-no-files-found: error
