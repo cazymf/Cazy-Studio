@@ -81,6 +81,7 @@ jobs:
           PY
           python patch.py
           python patch_progress.py
+          sed -i 's/0\.3\.3/0.3.4/' version.py
           python - <<'PY'
           from pathlib import Path
           import hashlib
