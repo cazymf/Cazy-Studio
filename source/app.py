@@ -43,7 +43,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.6  |  AutoDirector Workspace.')
+        self.title('Cazy Studio v0.3.7  |  AutoDirector Video Library')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
@@ -697,7 +697,7 @@ class Studio(tk.Tk):
         self.autodirector_workspace.pack(side='top',fill='both',expand=True,before=self.footer)
         self.active_section='autodirector'
         self.autodirector_view.refresh()
-        self.status_var.set('AutoDirector: saved queue and music library. AI cutting and uploads are upcoming.')
+        self.status_var.set('AutoDirector: select only the videos you want. Cutting and rendering are future stages.')
 
     def show_editor(self):
         if self.active_section == 'editor':return
@@ -705,7 +705,7 @@ class Studio(tk.Tk):
         self.autodirector_workspace.pack_forget()
         self.editor_workspace.pack(side='top',fill='both',expand=True,before=self.footer)
         self.active_section='editor'
-        self.status_var.set('Editor ready. AutoDirector queue stays saved between sessions.')
+        self.status_var.set('Editor ready. Your selected AutoDirector videos stay saved between sessions.')
 
     def open_update_center(self):
         update_center.open_update_center(self)
@@ -992,7 +992,7 @@ class Studio(tk.Tk):
         self.preview_decoder.close()
         self.destroy()
 
-# ---- Cazy AutoDirector workspace foundation (v0.3.6) ----
+# ---- Cazy AutoDirector explicit video library (v0.3.7) ----
 # This lives in app.py to keep the existing v0.3.5 Update Center's safe-file
 # whitelist compatible: no new install-time Python module is required.
 _AUTODIRECTOR_MODES = ('Best Successful Attempts', 'Full Run')
@@ -1113,203 +1113,372 @@ def _autodirector_prepare(state,chooser=None):
 
 
 class AutoDirectorView(tk.Frame):
-    """Persistent native workspace for future specialized Genshin AutoDirector.
+    """Simple, explicit local video selection for the AutoDirector pipeline.
 
-    This foundation deliberately does NOT pretend fight recognition, render automation,
-    or OAuth upload is available yet. Queue and music preparation do work today.
+    Only user-selected files enter this library. The original files are never
+    copied, moved, edited or deleted by library operations. This stage plans
+    the queue and music; it does not cut footage, render or publish videos.
     """
     def __init__(self, parent):
-        super().__init__(parent,bg=BG)
-        try:self.state=_autodirector_load()
+        super().__init__(parent, bg=BG)
+        try:
+            self.state = _autodirector_load()
         except ValueError as exc:
-            self.state=_autodirector_defaults()
-            messagebox.showwarning('AutoDirector data',str(exc),parent=self.winfo_toplevel())
-        self.mode_var=tk.StringVar(value=self.state['mode'])
-        self.visibility_var=tk.StringVar(value=self.state['visibility'])
-        self.music_var=tk.StringVar(value=self.state['music_folder'])
-        self.random_var=tk.BooleanVar(value=self.state['random_music'])
-        self.avoid_var=tk.BooleanVar(value=self.state['avoid_repeats'])
-        self.preset_var=tk.StringVar(value=self.state.get('render_preset',''))
-        self.status_var=tk.StringVar(value='Ready: add OBS recordings to build your production queue.')
+            self.state = _autodirector_defaults()
+            messagebox.showwarning('AutoDirector library', str(exc), parent=self.winfo_toplevel())
+        self.mode_var = tk.StringVar(value=self.state['mode'])
+        self.music_var = tk.StringVar(value=self.state['music_folder'])
+        self.random_var = tk.BooleanVar(value=self.state['random_music'])
+        self.avoid_var = tk.BooleanVar(value=self.state['avoid_repeats'])
+        self.preset_var = tk.StringVar(value=self.state.get('render_preset', ''))
+        self.status_var = tk.StringVar(value='Ready. Choose the exact recordings you want AutoDirector to use.')
+        self.detail_var = tk.StringVar(value='Select a recording to see its location and preview it.')
         self._make_view()
         self.refresh()
 
-    def _label(self,parent,text,size=10,color=TEXT,bold=False):
-        return tk.Label(parent,text=text,bg=parent.cget('bg'),fg=color,anchor='w',
-                        font=('Segoe UI',size,'bold' if bold else 'normal'))
+    def _label(self, parent, text, size=10, color=TEXT, bold=False):
+        return tk.Label(parent, text=text, bg=parent.cget('bg'), fg=color, anchor='w',
+                        font=('Segoe UI', size, 'bold' if bold else 'normal'))
 
-    def _button(self,parent,text,callback,primary=False):
-        return tk.Button(parent,text=text,command=callback,bg=ACCENT if primary else CARD2,
-                         fg='#0d0f18' if primary else TEXT,activebackground='#b99fff' if primary else BORDER,
-                         activeforeground='#0d0f18' if primary else TEXT,relief='flat',borderwidth=0,
-                         padx=11,pady=8,cursor='hand2',font=('Segoe UI',9,'bold'))
+    def _button(self, parent, text, callback, primary=False):
+        return tk.Button(parent, text=text, command=callback,
+                         bg=ACCENT if primary else CARD2,
+                         fg='#0d0f18' if primary else TEXT,
+                         activebackground='#b99fff' if primary else BORDER,
+                         activeforeground='#0d0f18' if primary else TEXT,
+                         relief='flat', borderwidth=0, padx=11, pady=8,
+                         cursor='hand2', font=('Segoe UI', 9, 'bold'))
 
-    def _check(self,parent,text,variable):
-        return tk.Checkbutton(parent,text=text,variable=variable,command=self.save,
-                              bg=CARD,fg=TEXT,activebackground=CARD,activeforeground=TEXT,
-                              selectcolor=CARD2,highlightthickness=0,anchor='w',font=('Segoe UI',9))
+    def _check(self, parent, text, variable):
+        return tk.Checkbutton(parent, text=text, variable=variable, command=self.save,
+                              bg=CARD, fg=TEXT, activebackground=CARD,
+                              activeforeground=TEXT, selectcolor=CARD2,
+                              highlightthickness=0, anchor='w', font=('Segoe UI', 9))
 
     def _make_view(self):
-        top=tk.Frame(self,bg=BG)
-        top.pack(fill='x',padx=18,pady=(17,10))
-        self._label(top,'CAZY AUTODIRECTOR',19,ACCENT,True).pack(side='left')
-        self._label(top,'Genshin Abyss + Stygian  |  Local-first production workspace',10,MUTED).pack(side='left',padx=19)
-        self._button(top,'Save Queue',self.save).pack(side='right')
+        top = tk.Frame(self, bg=BG)
+        top.pack(fill='x', padx=18, pady=(15, 8))
+        self._label(top, 'CAZY AUTODIRECTOR', 19, ACCENT, True).pack(side='left')
+        self._label(top, 'Select videos  →  Plan edits  →  Review results', 10, MUTED).pack(side='left', padx=18)
+        self._button(top, 'Save Library', self.save).pack(side='right')
 
-        note=tk.Frame(self,bg='#172337',highlightbackground=BORDER,highlightthickness=1)
-        note.pack(fill='x',padx=18,pady=(0,10))
-        tk.Label(note,bg='#172337',fg=ACCENT2,anchor='w',
-                 text='AUTO-PRODUCTION FOUNDATION  |  Working: queue, music library, song assignment, saved settings.  Coming next: fight detector, render automation, YouTube OAuth.',
-                 font=('Segoe UI',9,'bold'),wraplength=1290,justify='left').pack(fill='x',padx=12,pady=9)
+        note = tk.Frame(self, bg='#172337', highlightbackground=BORDER, highlightthickness=1)
+        note.pack(fill='x', padx=18, pady=(0, 10))
+        tk.Label(note, bg='#172337', fg=ACCENT2, anchor='w',
+                 text='LOCAL WORKSPACE  •  ONLY videos YOU add are included. Nothing is scanned automatically. '
+                      'Your original recordings stay untouched. No YouTube connection or publishing.',
+                 font=('Segoe UI', 9, 'bold'), wraplength=1250, justify='left').pack(fill='x', padx=12, pady=9)
 
-        pane=tk.PanedWindow(self,orient='horizontal',bg=BG,sashwidth=8,sashrelief='flat',bd=0)
-        pane.pack(fill='both',expand=True,padx=18,pady=(0,10))
-        queue_card=tk.Frame(pane,bg=CARD,highlightbackground=BORDER,highlightthickness=1)
-        options_card=tk.Frame(pane,bg=CARD,highlightbackground=BORDER,highlightthickness=1,width=410)
-        pane.add(queue_card,minsize=380,stretch='always')
-        pane.add(options_card,minsize=340,stretch='never')
+        pane = tk.PanedWindow(self, orient='horizontal', bg=BG,
+                             sashwidth=8, sashrelief='flat', bd=0)
+        pane.pack(fill='both', expand=True, padx=18, pady=(0, 10))
+        library = tk.Frame(pane, bg=CARD, highlightbackground=BORDER, highlightthickness=1)
+        options = tk.Frame(pane, bg=CARD, highlightbackground=BORDER,
+                           highlightthickness=1, width=365)
+        pane.add(library, minsize=475, stretch='always')
+        pane.add(options, minsize=340, stretch='never')
 
-        self._label(queue_card,'BATCH RECORDING QUEUE',12,ACCENT2,True).pack(anchor='w',padx=15,pady=(16,3))
-        self._label(queue_card,'Import multiple OBS videos. The queue is saved even after closing Studio.',9,MUTED).pack(anchor='w',padx=15,pady=(0,9))
-        buttons=tk.Frame(queue_card,bg=CARD);buttons.pack(fill='x',padx=13,pady=(0,9))
-        self._button(buttons,'+ Add Videos',self.add_files,True).pack(side='left',padx=(0,6))
-        self._button(buttons,'+ Add Folder',self.add_folder).pack(side='left',padx=(0,6))
-        self._button(buttons,'Remove',self.remove).pack(side='left',padx=(0,6))
-        self._button(buttons,'Move Up',lambda:self.move(-1)).pack(side='left',padx=(0,6))
-        self._button(buttons,'Move Down',lambda:self.move(1)).pack(side='left')
-        tree_shell=tk.Frame(queue_card,bg=CARD)
-        tree_shell.pack(fill='both',expand=True,padx=12,pady=(0,8))
-        self.tree=ttk.Treeview(tree_shell,columns=('file','state','music'),show='headings',selectmode='browse')
-        self.tree.heading('file',text='OBS RECORDING')
-        self.tree.heading('state',text='STATUS')
-        self.tree.heading('music',text='ASSIGNED MUSIC')
-        self.tree.column('file',width=260,anchor='w')
-        self.tree.column('state',width=90,anchor='w',stretch=False)
-        self.tree.column('music',width=210,anchor='w')
-        self.tree.pack(side='left',fill='both',expand=True)
-        scrollbar=ttk.Scrollbar(tree_shell,orient='vertical',command=self.tree.yview)
-        scrollbar.pack(side='right',fill='y')
+        self._label(library, '1  YOUR SELECTED VIDEOS', 13, ACCENT2, True).pack(
+            anchor='w', padx=15, pady=(15, 4))
+        self._label(library, 'Add the exact OBS recordings you want. No folder scanning.',
+                    9, MUTED).pack(anchor='w', padx=15, pady=(0, 9))
+        actions = tk.Frame(library, bg=CARD)
+        actions.pack(fill='x', padx=13, pady=(0, 9))
+        self._button(actions, '+ ADD VIDEOS', self.add_files, True).pack(side='left', padx=(0, 6))
+        self._button(actions, 'Preview', self.preview_selected).pack(side='left', padx=(0, 6))
+        self._button(actions, 'Remove', self.remove).pack(side='left', padx=(0, 6))
+        self._button(actions, '↑', lambda: self.move(-1)).pack(side='left', padx=(0, 4))
+        self._button(actions, '↓', lambda: self.move(1)).pack(side='left')
+        self._button(actions, 'Clear List', self.clear_all).pack(side='right')
+
+        self.empty_hint = tk.Label(library,
+            text='No recordings selected yet.  Click + ADD VIDEOS to choose your clips.',
+            bg=CARD2, fg=MUTED, font=('Segoe UI', 10), pady=14)
+        self.empty_hint.pack(fill='x', padx=12, pady=(0, 8))
+        tree_shell = tk.Frame(library, bg=CARD)
+        tree_shell.pack(fill='both', expand=True, padx=12, pady=(0, 8))
+        self.tree = ttk.Treeview(tree_shell,
+                                 columns=('number', 'file', 'state', 'music'),
+                                 show='headings', selectmode='browse')
+        self.tree.heading('number', text='#')
+        self.tree.heading('file', text='SELECTED RECORDING')
+        self.tree.heading('state', text='READY?')
+        self.tree.heading('music', text='MUSIC')
+        self.tree.column('number', width=35, anchor='center', stretch=False)
+        self.tree.column('file', width=275, anchor='w')
+        self.tree.column('state', width=105, anchor='w', stretch=False)
+        self.tree.column('music', width=155, anchor='w')
+        self.tree.tag_configure('missing', foreground=RED)
+        self.tree.pack(side='left', fill='both', expand=True)
+        scrollbar = ttk.Scrollbar(tree_shell, orient='vertical', command=self.tree.yview)
+        scrollbar.pack(side='right', fill='y')
         self.tree.configure(yscrollcommand=scrollbar.set)
-        self.tree.bind('<Delete>',lambda e:self.remove())
-        lower=tk.Frame(queue_card,bg=CARD);lower.pack(fill='x',padx=14,pady=(0,15))
-        self.count_label=self._label(lower,'No recordings',10,MUTED,True)
+        self.tree.bind('<Delete>', lambda event: self.remove())
+        self.tree.bind('<Double-1>', lambda event: self.preview_selected())
+        self.tree.bind('<<TreeviewSelect>>', lambda event: self._update_details())
+
+        info = tk.Frame(library, bg=CARD)
+        info.pack(fill='x', padx=14, pady=(0, 7))
+        self.count_label = self._label(info, '0 videos selected', 10, ACCENT2, True)
         self.count_label.pack(side='left')
-        self._button(lower,'PREPARE QUEUE + PICK MUSIC',self.prepare,True).pack(side='right')
+        self._label(info, 'Double-click to preview', 9, MUTED).pack(side='right')
+        tk.Label(library, textvariable=self.detail_var, bg=CARD,
+                 fg=MUTED, anchor='w', font=('Segoe UI', 9),
+                 wraplength=650, justify='left').pack(fill='x', padx=14, pady=(0, 9))
 
-        self._label(options_card,'AUTO-EDIT PLAN',12,ACCENT2,True).pack(anchor='w',padx=15,pady=(16,5))
-        self._label(options_card,'Genshin run selection',9,MUTED).pack(anchor='w',padx=15,pady=(0,4))
-        self._combo(options_card,self.mode_var,_AUTODIRECTOR_MODES).pack(fill='x',padx=15,pady=(0,11))
+        bottom = tk.Frame(library, bg=CARD)
+        bottom.pack(fill='x', padx=14, pady=(0, 14))
+        self._label(bottom, 'Next: prepare local music assignments',
+                    9, MUTED).pack(side='left', pady=8)
+        self._button(bottom, 'PREPARE SELECTED VIDEOS', self.prepare, True).pack(side='right')
 
-        self._label(options_card,'MUSIC LIBRARY',12,ACCENT2,True).pack(anchor='w',padx=15,pady=(7,5))
-        folder=tk.Frame(options_card,bg=CARD);folder.pack(fill='x',padx=15)
-        tk.Entry(folder,textvariable=self.music_var,bg=CARD2,fg=TEXT,relief='flat',
-                 insertbackground=TEXT,state='readonly',readonlybackground=CARD2).pack(side='left',fill='x',expand=True,padx=(0,6),ipady=6)
-        self._button(folder,'Browse',self.choose_music).pack(side='right')
-        self._check(options_card,'Random song for each video',self.random_var).pack(anchor='w',padx=15,pady=(8,0))
-        self._check(options_card,'Avoid consecutive repeats',self.avoid_var).pack(anchor='w',padx=15)
-        self.music_count=self._label(options_card,'No music folder selected',9,MUTED)
-        self.music_count.pack(anchor='w',padx=15,pady=(3,8))
+        self._label(options, '2  EDITING PLAN', 13, ACCENT2, True).pack(
+            anchor='w', padx=15, pady=(16, 5))
+        self._label(options, 'What should AutoDirector keep?', 9, MUTED).pack(
+            anchor='w', padx=15, pady=(0, 4))
+        self._combo(options, self.mode_var, _AUTODIRECTOR_MODES).pack(
+            fill='x', padx=15, pady=(0, 7))
+        self._label(options, 'Fight recognition and auto-cuts are in development.',
+                    9, YELLOW).pack(anchor='w', padx=15, pady=(0, 12))
 
-        self._label(options_card,'QUALITY + YOUTUBE',12,ACCENT2,True).pack(anchor='w',padx=15,pady=(6,5))
-        self._label(options_card,'Saved Quality Lab render preset',9,MUTED).pack(anchor='w',padx=15)
-        self.preset_combo=self._combo(options_card,self.preset_var,('Use last-used settings',))
-        self.preset_combo.pack(fill='x',padx=15,pady=(3,8))
-        self._label(options_card,'Future YouTube upload visibility',9,MUTED).pack(anchor='w',padx=15)
-        self._combo(options_card,self.visibility_var,('Private','Unlisted','Public')).pack(fill='x',padx=15,pady=(3,8))
-        self._label(options_card,'YouTube: not connected. OAuth upload is not implemented yet.',9,MUTED).pack(anchor='w',padx=15,pady=(3,7))
-        self._label(options_card,'AI mode: local first; OpenAI connection optional.',9,GREEN).pack(anchor='w',padx=15)
+        self._label(options, 'MUSIC', 11, ACCENT2, True).pack(
+            anchor='w', padx=15, pady=(0, 5))
+        folder = tk.Frame(options, bg=CARD)
+        folder.pack(fill='x', padx=15)
+        tk.Entry(folder, textvariable=self.music_var, bg=CARD2, fg=TEXT,
+                 relief='flat', insertbackground=TEXT, state='readonly',
+                 readonlybackground=CARD2).pack(side='left', fill='x',
+                                                expand=True, padx=(0, 6), ipady=6)
+        self._button(folder, 'Choose Folder', self.choose_music).pack(side='right')
+        self._check(options, 'Random song for each video', self.random_var).pack(
+            anchor='w', padx=15, pady=(8, 0))
+        self._check(options, 'No back-to-back repeats', self.avoid_var).pack(
+            anchor='w', padx=15)
+        self.music_count = self._label(options, 'No music selected', 9, MUTED)
+        self.music_count.pack(anchor='w', padx=15, pady=(3, 11))
 
-        foot=tk.Frame(self,bg=BG);foot.pack(fill='x',padx=18,pady=(0,14))
-        self._label(foot,'STAGE: PLAN ONLY — automatic cutting, rendering, and publishing are not active in this version.',9,ACCENT2,True).pack(anchor='w')
-        tk.Label(foot,textvariable=self.status_var,bg=BG,fg=MUTED,anchor='w',font=('Segoe UI',9),
-                 wraplength=1150,justify='left').pack(fill='x',pady=(4,0))
+        self._label(options, 'RENDER PRESET', 11, ACCENT2, True).pack(
+            anchor='w', padx=15, pady=(0, 4))
+        self._label(options, 'Use your existing Quality Lab preset', 9, MUTED).pack(
+            anchor='w', padx=15)
+        self.preset_combo = self._combo(options, self.preset_var,
+                                       ('Use last-used settings',))
+        self.preset_combo.pack(fill='x', padx=15, pady=(4, 12))
 
-    def _combo(self,parent,var,values):
-        widget=ttk.Combobox(parent,textvariable=var,state='readonly',values=list(values),style='Field.TCombobox')
-        widget.bind('<<ComboboxSelected>>',lambda e:self.save())
+        review = tk.Frame(options, bg=CARD2)
+        review.pack(fill='x', padx=14, pady=(1, 12))
+        tk.Label(review, text='3  OUTPUT REVIEW  ·  COMING LATER', bg=CARD2,
+                 fg=ACCENT2, anchor='w', font=('Segoe UI', 10, 'bold')).pack(
+                     fill='x', padx=10, pady=(10, 5))
+        tk.Label(review, text='Final video  •  Thumbnail  •  Title',
+                 bg=CARD2, fg=TEXT, anchor='w',
+                 font=('Segoe UI', 9)).pack(fill='x', padx=10, pady=(0, 5))
+        tk.Label(review, text='YouTube publishing will be added only after the editor works reliably.',
+                 bg=CARD2, fg=MUTED, anchor='w', justify='left', wraplength=290,
+                 font=('Segoe UI', 9)).pack(fill='x', padx=10, pady=(0, 10))
+
+        footer = tk.Frame(self, bg=BG)
+        footer.pack(fill='x', padx=18, pady=(0, 12))
+        self._label(footer, 'CURRENT STAGE: video library + queue preparation. '
+                          'No automatic cutting, rendering or uploading yet.',
+                    9, ACCENT2, True).pack(anchor='w')
+        tk.Label(footer, textvariable=self.status_var, bg=BG, fg=MUTED,
+                 anchor='w', font=('Segoe UI', 9), wraplength=1150,
+                 justify='left').pack(fill='x', pady=(4, 0))
+
+    def _combo(self, parent, var, values):
+        widget = ttk.Combobox(parent, textvariable=var, state='readonly',
+                              values=list(values), style='Field.TCombobox')
+        widget.bind('<<ComboboxSelected>>', lambda event: self.save())
         return widget
 
     def refresh(self):
-        selected=self.tree.selection()
-        index=int(selected[0]) if selected else -1
-        for row in self.tree.get_children():self.tree.delete(row)
-        for i,job in enumerate(self.state['queue']):
-            self.tree.insert('',tk.END,iid=str(i),values=(Path(job['path']).name,job['status'],Path(job['music']).name if job['music'] else '—'))
-        if 0<=index<len(self.state['queue']):self.tree.selection_set(str(index))
-        n=len(self.state['queue'])
-        self.count_label.configure(text=f'{n} recording'+('s' if n!=1 else '')+' in queue')
-        self.music_count.configure(text=f'{len(_autodirector_tracks(self.music_var.get()))} available tracks')
+        selected = self.tree.selection()
+        index = int(selected[0]) if selected else -1
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+        missing = 0
+        for i, job in enumerate(self.state['queue']):
+            exists = Path(job['path']).is_file()
+            if not exists:
+                missing += 1
+            label = job['status'] if exists else 'MISSING FILE'
+            self.tree.insert('', tk.END, iid=str(i),
+                             values=(i + 1, Path(job['path']).name, label,
+                                     Path(job['music']).name if job['music'] else '—'),
+                             tags=() if exists else ('missing',))
+        if 0 <= index < len(self.state['queue']):
+            self.tree.selection_set(str(index))
+        n = len(self.state['queue'])
+        info = f'{n} video' + ('s' if n != 1 else '') + ' selected'
+        if missing:
+            info += f'  •  {missing} missing'
+        self.count_label.configure(text=info, fg=RED if missing else ACCENT2)
+        if n:
+            self.empty_hint.pack_forget()
+        elif not self.empty_hint.winfo_manager():
+            self.empty_hint.pack(fill='x', padx=12, pady=(0, 8),
+                                 before=self.tree.master)
+        self.music_count.configure(
+            text=f'{len(_autodirector_tracks(self.music_var.get()))} available songs')
         try:
-            presets=quality_engine.load_preferences().get('presets',{})
-            names=['Use last-used settings']+sorted(presets)
-        except (OSError,ValueError):names=['Use last-used settings']
+            presets = quality_engine.load_preferences().get('presets', {})
+            names = ['Use last-used settings'] + sorted(presets)
+        except (OSError, ValueError):
+            names = ['Use last-used settings']
         self.preset_combo.configure(values=names)
-        if self.preset_var.get() not in names:self.preset_var.set(names[0])
+        if self.preset_var.get() not in names:
+            self.preset_var.set(names[0])
+        self._update_details()
 
     def _selected(self):
-        selected=self.tree.selection()
+        selected = self.tree.selection()
         return int(selected[0]) if selected else -1
 
+    def _update_details(self):
+        i = self._selected()
+        if i < 0:
+            self.detail_var.set('Select a recording to see its location and preview it.')
+            return
+        path = Path(self.state['queue'][i]['path'])
+        if path.is_file():
+            try:
+                size = f'{path.stat().st_size / (1024 ** 2):,.1f} MB'
+            except OSError:
+                size = 'Size unavailable'
+            self.detail_var.set(f'{size}   •   {path}')
+        else:
+            self.detail_var.set(f'Missing file: {path}. Remove it and add its new location.')
+
     def save(self):
-        self.state['music_folder']=self.music_var.get()
-        self.state['random_music']=self.random_var.get()
-        self.state['avoid_repeats']=self.avoid_var.get()
-        self.state['mode']=self.mode_var.get()
-        self.state['visibility']=self.visibility_var.get()
-        self.state['render_preset']=self.preset_var.get()
-        try:_autodirector_save(self.state)
-        except (ValueError,OSError) as exc:
-            messagebox.showerror('Save AutoDirector queue',str(exc),parent=self)
+        self.state['music_folder'] = self.music_var.get()
+        self.state['random_music'] = self.random_var.get()
+        self.state['avoid_repeats'] = self.avoid_var.get()
+        self.state['mode'] = self.mode_var.get()
+        self.state['render_preset'] = self.preset_var.get()
+        # Legacy visibility setting remains in existing saved queues for
+        # compatibility, but there is no publishing UI or publishing action.
+        try:
+            _autodirector_save(self.state)
+        except (ValueError, OSError) as exc:
+            messagebox.showerror('Save video library', str(exc), parent=self)
             return False
         return True
 
     def add_files(self):
-        files=filedialog.askopenfilenames(parent=self,title='Add OBS Genshin recordings',filetypes=[('Videos','*.mp4 *.mkv *.mov *.avi *.webm *.m4v'),('All files','*.*')])
-        n=_autodirector_add(self.state,files)
-        if n:
-            self.save();self.refresh()
-            self.status_var.set(f'Added {n} video(s). Add more or prepare your music assignments.')
-        elif files:
-            self.status_var.set('Those files were already queued or are not supported videos.')
+        files = filedialog.askopenfilenames(
+            parent=self, title='Choose ONLY the recordings to process',
+            filetypes=[('Video recordings', '*.mp4 *.mkv *.mov *.avi *.webm *.m4v'),
+                       ('All files', '*.*')])
+        if not files:
+            return
+        added = _autodirector_add(self.state, files)
+        if added:
+            self.save()
+            self.refresh()
+            self.tree.selection_set(str(len(self.state['queue']) - 1))
+            self.tree.see(str(len(self.state['queue']) - 1))
+            self._update_details()
+            self.status_var.set(f'Added {added} recording(s). Only these selected files are in your library.')
+        else:
+            self.status_var.set('No new videos added. Files may already be selected or unsupported.')
 
-    def add_folder(self):
-        folder=filedialog.askdirectory(parent=self,title='Add all videos from an OBS recording folder')
-        if not folder:return
-        files=sorted(str(p) for p in Path(folder).iterdir() if p.is_file() and p.suffix.lower() in _AUTODIRECTOR_VIDEO_EXTS)
-        n=_autodirector_add(self.state,files)
-        if n:self.save();self.refresh()
-        self.status_var.set(f'Imported {n} new recording(s) from {folder}.')
+    def preview_selected(self):
+        i = self._selected()
+        if i < 0:
+            messagebox.showinfo('Preview video', 'Select a recording from the list first.', parent=self)
+            return
+        path = self.state['queue'][i]['path']
+        if not Path(path).is_file():
+            messagebox.showerror('Video not found', 'The selected video was moved or deleted. '
+                                 'Remove it and add its new location.', parent=self)
+            return
+        try:
+            if os.name == 'nt':
+                os.startfile(path)
+            else:
+                import sys
+                subprocess.Popen(['open' if sys.platform == 'darwin' else 'xdg-open', path])
+        except (OSError, AttributeError) as exc:
+            messagebox.showerror('Could not preview video', str(exc), parent=self)
+
+    def clear_all(self):
+        if not self.state['queue']:
+            return
+        if not messagebox.askyesno('Clear selected videos',
+                                   'Remove every recording from the AutoDirector list?\n\n'
+                                   'Your original video files will NOT be deleted.',
+                                   parent=self):
+            return
+        n = len(self.state['queue'])
+        self.state['queue'].clear()
+        self.save()
+        self.refresh()
+        self.status_var.set(f'Removed {n} recordings from the list. Original videos are untouched.')
 
     def remove(self):
-        i=self._selected()
-        if i<0:return
+        i = self._selected()
+        if i < 0:
+            return
+        name = Path(self.state['queue'][i]['path']).name
         self.state['queue'].pop(i)
-        self.save();self.refresh()
+        self.save()
+        self.refresh()
+        if self.state['queue']:
+            self.tree.selection_set(str(min(i, len(self.state['queue']) - 1)))
+        self._update_details()
+        self.status_var.set(f'Removed {name} from AutoDirector only. Original file untouched.')
 
-    def move(self,delta):
-        i=self._selected();j=i+delta
-        if i<0 or j<0 or j>=len(self.state['queue']):return
-        q=self.state['queue'];q[i],q[j]=q[j],q[i]
-        self.save();self.refresh();self.tree.selection_set(str(j))
+    def move(self, delta):
+        i = self._selected()
+        j = i + delta
+        if i < 0 or j < 0 or j >= len(self.state['queue']):
+            return
+        q = self.state['queue']
+        q[i], q[j] = q[j], q[i]
+        self.save()
+        self.refresh()
+        self.tree.selection_set(str(j))
+        self.tree.see(str(j))
+        self._update_details()
 
     def choose_music(self):
-        folder=filedialog.askdirectory(parent=self,title='Choose your music collection')
-        if not folder:return
+        folder = filedialog.askdirectory(parent=self, title='Choose your music collection')
+        if not folder:
+            return
         self.music_var.set(folder)
-        self.save();self.refresh()
-        self.status_var.set(f'Music library selected: {len(_autodirector_tracks(folder))} compatible songs')
+        self.save()
+        self.refresh()
+        self.status_var.set(
+            f'Music collection selected: {len(_autodirector_tracks(folder))} compatible songs.')
 
     def prepare(self):
         if not self.state['queue']:
-            messagebox.showinfo('Empty production queue','Add at least one recording first.',parent=self)
+            messagebox.showinfo('No selected videos',
+                                'Click + ADD VIDEOS and choose at least one recording.',
+                                parent=self)
+            return
+        missing = [Path(job['path']).name for job in self.state['queue']
+                   if not Path(job['path']).is_file()]
+        if missing:
+            messagebox.showerror('Missing recordings',
+                                 f'{len(missing)} selected video(s) could not be found.\n\n'
+                                 'Remove missing entries and re-add them at their current location.',
+                                 parent=self)
             return
         if self.random_var.get() and not _autodirector_tracks(self.music_var.get()):
-            if not messagebox.askyesno('No music tracks','No compatible music files were found. Prepare the queue without a soundtrack?',parent=self):
+            if not messagebox.askyesno('No music tracks',
+                                       'No compatible music files were found. '
+                                       'Prepare the selected videos without music?', parent=self):
                 return
+        if not self.save():
+            return
+        count = _autodirector_prepare(self.state)
         self.save()
-        n=_autodirector_prepare(self.state)
-        self.save();self.refresh()
-        self.status_var.set(f'{n} recordings prepared with music assignments. AI cutting, rendering and YouTube upload are upcoming milestones.')
+        self.refresh()
+        self.status_var.set(
+            f'{count} selected video(s) prepared with local music assignments. '
+            'Automatic cutting, rendering, thumbnails and titles are next development stages.')
 
 
 if __name__=='__main__':
