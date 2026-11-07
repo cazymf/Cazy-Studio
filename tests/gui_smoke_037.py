@@ -42,7 +42,13 @@ ns = {
     'json': json, 'random': random, 'queue': queue, 'threading': threading,
     'filedialog': filedialog,
     'messagebox': messagebox, 'subprocess': subprocess,
-    'quality_engine': types.SimpleNamespace(load_preferences=lambda: {'presets': {}}),
+    'quality_engine': types.SimpleNamespace(
+        load_preferences=lambda: {'presets': {}},
+        resolve_saved_render_preset=lambda name: types.SimpleNamespace(
+            resolution='1440p Landscape', fps=60, upscale='Real-ESRGAN Anime',
+            frame_method='Native / Duplicate', encoder='Auto / NVIDIA NVENC',
+            quality='Maximum'),
+        _cazy_tesseract=lambda: None),
     'autodirector_fullrun': types.SimpleNamespace(
         normalize_references=lambda refs, old='': {
             k:list(refs.get(k,[])) for k in ('start','switch','complete','failure','blessing')},
@@ -76,11 +82,27 @@ with tempfile.TemporaryDirectory() as temp:
         view._update_details()
         assert 'selected.mp4' in view.detail_var.get()
         assert view.save()
+        assert '1440p Landscape' in view.recipe_details_var.get()
+        assert 'Real-ESRGAN Anime' in view.recipe_details_var.get()
         view.remove()
         window.update_idletasks()
         assert not view.state['queue']
         assert view.empty_hint.winfo_manager() == 'pack'
         assert recording.is_file() and unused.is_file()
+        # No transition reference: show an actionable preflight instead of
+        # scanning silently and opening a huge empty chamber table.
+        ns['_autodirector_add'](view.state,[recording])
+        view.state['references']={
+            'start':[str(recording)], 'switch':[],
+            'complete':[str(recording)],'failure':[],'blessing':[]}
+        old_dialog=messagebox.askyesno
+        messagebox.askyesno=lambda *a,**k:False
+        try:
+            view.scan_entire_full_run()
+            assert not view._auto_busy
+            assert 'On the other side' in view.status_var.get()
+        finally:
+            messagebox.askyesno=old_dialog
         # The Full Run review is a separate visible table containing BOTH halves.
         full_run={'completed_chambers':1,'reports':[{'duration':14.}],
                   'segments':[
