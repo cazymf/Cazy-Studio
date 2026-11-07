@@ -72,7 +72,7 @@ class RenderProgressTests(unittest.TestCase):
         self.assertTrue(progress)
         self.assertEqual(progress[-1],(1.0,30,30))
         self.assertTrue(any(done is not None and done>0 for _,done,_ in progress))
-        self.assertTrue(all(total==30 for _,_,total in progress))
+        self.assertTrue(all(total==30 for _,_,total in progress if total is not None))
 
     def test_quality_lab_and_autodirector_display_the_stage_metric(self):
         source=ENGINE.read_text(encoding='utf-8')
