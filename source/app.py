@@ -1374,8 +1374,9 @@ class AutoDirectorView(tk.Frame):
         self.update_saved_recipe_details()
         references = autodirector_fullrun.normalize_references(
             self.state.get('references',{}),self.state.get('success_reference',''))
-        self.reference_hint.configure(text='  •  '.join(
-            f'{key}: {len(references[key])}' for key in ('start','switch','complete')))
+        self.reference_hint.configure(text='Saved screenshot examples (not detections): ' +
+            ' / '.join(f'{key} {len(references[key])}'
+                     for key in ('start','switch','complete')))
         self._update_details()
 
     def _selected(self):
@@ -1859,6 +1860,17 @@ class AutoDirectorView(tk.Frame):
             return
         refs=autodirector_fullrun.normalize_references(
             self.state.get('references',{}),self.state.get('success_reference',''))
+        missing=[kind for kind in ('start','switch','complete') if not refs[kind]]
+        if missing and not quality_engine._cazy_tesseract():
+            readable=', '.join(autodirector_fullrun.REFERENCE_KINDS[k] for k in missing)
+            self.status_var.set('Add missing Abyss detection screenshots: '+readable)
+            if messagebox.askyesno('Missing detection screenshots',
+                'Full Run needs examples of all three chamber transitions '
+                'unless Tesseract OCR is installed.\n\n'
+                'Missing: '+readable+'\n\n'
+                'Open screenshot library to add examples now?',parent=self):
+                self.manage_references()
+            return
         self._auto_busy=True
         self._auto_cancel.clear()
         self.status_var.set(f'Scanning ALL {len(paths)} selected recording(s) in queue order…')
@@ -1872,7 +1884,71 @@ class AutoDirectorView(tk.Frame):
                 self._auto_messages.put(('error',str(exc)))
         threading.Thread(target=work,daemon=True).start()
 
+    def show_detection_report(self,result):
+        """Explain zero clips using *actual detected events*, not saved images."""
+        win=tk.Toplevel(self)
+        win.title('AutoDirector — Detection Report')
+        win.geometry('850x570')
+        win.minsize(670,450)
+        win.configure(bg=BG)
+        body=tk.Frame(win,bg=BG)
+        body.pack(fill='both',expand=True,padx=18,pady=14)
+        self._label(body,'FULL RUN SCAN REPORT',17,ACCENT2,True).pack(anchor='w')
+        self._label(body,f'{len(result.get("reports",[]))} recording(s) scanned  '
+                         f'•  {result.get("completed_chambers",0)} completed chamber(s)',
+                    10,TEXT,True).pack(anchor='w',pady=(8,7))
+        counts=result.get('event_counts',{})
+        if not counts:
+            counts={k:sum(e.get('kind')==k for report in result.get('reports',[])
+                          for e in report.get('events',[]))
+                    for k in ('start','switch','complete','failure')}
+        stats=('ACTUALLY DETECTED IN VIDEO:  '
+               f'Start {counts.get("start",0)}  •  '
+               f'Other Side {counts.get("switch",0)}  •  '
+               f'Completed {counts.get("complete",0)}  •  '
+               f'Failed {counts.get("failure",0)}')
+        self._label(body,stats,10,ACCENT2,True).pack(anchor='w',pady=(0,8))
+        hints=[]
+        if not result.get('segments'):
+            hints.append('No complete chamber sequence was found. Nothing will be rendered.')
+        if not counts.get('switch',0):
+            hints.append('No "On the other side..." transition was detected.')
+        if not counts.get('start',0):
+            hints.append('No "Start Challenge" prompt was detected.')
+        if not counts.get('complete',0):
+            hints.append('No "Challenge Completed" screen was detected.')
+        for report in result.get('reports',[]):
+            for note in report.get('notes',[]):
+                hints.append(Path(report.get('path','video')).name+': '+note)
+        if not hints:
+            hints.append('Review the proposed half clips and their cut boundaries.')
+        tk.Label(body,text='\n'.join(hints[:9]),bg=CARD2,fg=YELLOW,
+                 font=('Segoe UI',9),justify='left',anchor='w',
+                 wraplength=790,padx=12,pady=10).pack(fill='x',pady=(0,10))
+        self._label(body,'Detected game events (video timestamps)',10,TEXT,True).pack(anchor='w')
+        tree=ttk.Treeview(body,columns=('video','time','event','how'),show='headings')
+        for col,label,width in [('video','RECORDING',230),('time','TIME (s)',86),
+                                ('event','EVENT',135),('how','DETECTION METHOD',270)]:
+            tree.heading(col,text=label)
+            tree.column(col,width=width,anchor='w')
+        tree.pack(fill='both',expand=True,pady=(6,10))
+        for report in result.get('reports',[]):
+            for event in report.get('events',[]):
+                tree.insert('',tk.END,values=(
+                    Path(report.get('path','')).name,event.get('at',''),
+                    event.get('kind','').upper(),event.get('evidence','')))
+        bottom=tk.Frame(body,bg=BG)
+        bottom.pack(fill='x')
+        self._button(bottom,'Manage Screenshot Examples',
+                     lambda:(win.destroy(),self.manage_references())).pack(side='left')
+        self._button(bottom,'Scan Again',
+                     lambda:(win.destroy(),self.scan_entire_full_run())).pack(side='left',padx=7)
+        self._button(bottom,'Close',win.destroy).pack(side='right')
+
     def review_full_run(self,result):
+        if not result.get('segments'):
+            self.show_detection_report(result)
+            return
         if self._review_window is not None and self._review_window.winfo_exists():
             self._review_window.destroy()
         win=tk.Toplevel(self)
@@ -2044,6 +2120,8 @@ class AutoDirectorView(tk.Frame):
         self._button(buttons,'Enable / Disable',toggle).pack(side='left',padx=(0,6))
         self._button(buttons,'Preview Source',preview).pack(side='left',padx=(0,6))
         self._button(buttons,'+ Manual Half',add_manual).pack(side='left')
+        self._button(buttons,'Scan Report',lambda:self.show_detection_report(result)).pack(
+            side='left',padx=6)
         self._button(buttons,'RENDER ONE FULL RUN',export,True).pack(side='right')
         if segments:
             table.selection_set('0')
