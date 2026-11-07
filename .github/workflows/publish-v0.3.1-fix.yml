@@ -1,0 +1,44 @@
+name: Repair Cazy Studio v0.3.1 release
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0.3.1-fix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download and validate previously uploaded update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download '@3.1' --repo "$GITHUB_REPOSITORY" --pattern 'Cazy_Studio_Update_0.3.1_FRESH.zip' --dir dist
+          mv dist/Cazy_Studio_Update_0.3.1_FRESH.zip dist/Cazy_Studio_v0_3_1_Update.zip
+          echo '8f29fc97685fcfc92739122d1c67a2b9114f42bc688ae531b33dab6404abb286  dist/Cazy_Studio_v0_3_1_Update.zip' | sha256sum --check
+          python - <<'PY'
+          import json,zipfile
+          p='dist/Cazy_Studio_v0_3_1_Update.zip'
+          with zipfile.ZipFile(p) as z:
+              m=json.loads(z.read('update_manifest.json'))
+              assert m['product']=='CazyStudio' and m['format']==1 and m['version']=='0.3.1',m
+          print('Cazy Studio v0.3.1 manifest verified')
+          PY
+
+      - name: Create corrected latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if gh release view v0.3.1 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.1 dist/Cazy_Studio_v0_3_1_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.1 dist/Cazy_Studio_v0_3_1_Update.zip --repo "$GITHUB_REPOSITORY" --title 'Cazy Studio v0.3.1' --notes 'Project format and high-FPS preview fixes. Corrected package name and validated SHA-256. For Cazy Studio v0.3.0 Update Center.'
+          fi
+          gh release edit v0.3.1 --repo "$GITHUB_REPOSITORY" --latest
