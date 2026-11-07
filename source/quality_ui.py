@@ -15,9 +15,9 @@ import engine
 BG='#0b101c';CARD='#141d2d';CARD2='#1c273a';TEXT='#edf3ff';MUTED='#92a4bd';ACCENT='#9b7cff';ACCENT2='#5abacb';GREEN='#50d2a3'
 
 class QualityLab(tk.Toplevel):
-    def __init__(self, master, suggested_path=None, timeline_clip=None):
+    def __init__(self, master, suggested_path=None, timeline_clip=None, selected_preset=None):
         super().__init__(master)
-        self.title('Cazy Studio • Quality Lab v0.3.10')
+        self.title('Cazy Studio • Quality Lab v0.3.13')
         self.geometry('1100x880')
         self.minsize(940,670)
         self.configure(bg=BG)
@@ -50,6 +50,8 @@ class QualityLab(tk.Toplevel):
         self.protocol('WM_DELETE_WINDOW',self._close)
         if suggested_path and Path(suggested_path).is_file():
             self.load_path(str(suggested_path))
+        if selected_preset and selected_preset != 'Use last-used settings':
+            self.apply_named_preset(selected_preset)
         if self.prefs_error:
             self.status.set(self.prefs_error + '  •  Existing file was left untouched.')
 
@@ -285,6 +287,29 @@ class QualityLab(tk.Toplevel):
             self.status.set(f'Saved render preset "{name}". It stays available after updates.')
         except (OSError,ValueError) as exc:
             messagebox.showerror('Save render preset',str(exc),parent=self)
+
+    def apply_named_preset(self, name):
+        """Load a named recipe into every visible Quality Lab control."""
+        if self.busy:
+            return
+        try:
+            # Reload from disk so a newly saved or updated preset is applied.
+            prefs = quality.load_preferences()
+            if name not in prefs['presets']:
+                raise ValueError('Saved render preset not found: ' + name)
+            opts = quality.decode_settings(prefs['presets'][name])
+            self._suspend_autosave = True
+            self.prefs = prefs
+            self._refresh_saved_presets()
+            self.saved_var.set(name)
+            self.options = opts
+            self._apply_render_settings(opts)
+            self.status.set(f'Loaded saved preset "{name}" from AutoDirector. '
+                            'These are the actual saved settings.')
+        except (OSError, ValueError) as exc:
+            messagebox.showerror('Load saved Quality Lab preset',str(exc),parent=self)
+        finally:
+            self._suspend_autosave = False
 
     def load_render_preset(self):
         if self.busy:

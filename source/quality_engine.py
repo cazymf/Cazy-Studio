@@ -642,6 +642,40 @@ def decode_settings(data: dict) -> QualitySettings:
     return opts
 
 
+
+def resolve_saved_render_preset(name: str) -> QualitySettings:
+    """Resolve the SAME named Quality Lab recipe shown by AutoDirector.
+
+    A missing name is an explicit error: never silently render with defaults.
+    """
+    if not name or name == 'Use last-used settings':
+        prefs = load_preferences()
+        if prefs.get('last_used'):
+            return decode_settings(prefs['last_used'])
+        return QualitySettings()
+    prefs = load_preferences()
+    if name not in prefs['presets']:
+        raise ValueError('Saved Quality Lab render preset not found: ' + name)
+    return decode_settings(prefs['presets'][name])
+
+
+def describe_saved_render_preset(name: str) -> str:
+    """Human-readable active recipe, with exact saved options."""
+    opts = resolve_saved_render_preset(name)
+    return (
+        f'Quality profile: {opts.preset}\n'
+        f'Resolution: {opts.resolution}  |  FPS: '
+        f'{opts.fps if opts.fps else "Source"}\n'
+        f'Upscaling: {opts.upscale}\n'
+        f'Frame generation: {opts.frame_method}\n'
+        f'AI speed: {opts.ai_speed}\n'
+        f'Encoder: {opts.encoder}  |  Quality: {opts.quality}\n'
+        f'Fit: {opts.fit}  |  Sharpen: {opts.sharpen}  |  '
+        f'Denoise: {opts.denoise}\n'
+        f'Blur: {opts.motion_blur}  |  Contrast: {opts.contrast}%  |  '
+        f'Saturation: {opts.saturation}%'
+    )
+
 def validate_name(name: str) -> str:
     if not isinstance(name, str):
         raise ValueError('Preset name must be text')
@@ -890,7 +924,7 @@ def cazy_render_local_package(video_path, begin, finish, destination, preset_nam
     if preset_name and preset_name != 'Use last-used settings':
         if preset_name not in settings['presets']:
             raise ValueError('Saved render preset not found: ' + preset_name)
-        opts = decode_settings(settings['presets'][preset_name])
+        opts = resolve_saved_render_preset(preset_name)
     elif settings.get('last_used'):
         opts = decode_settings(settings['last_used'])
     else:
@@ -1052,7 +1086,7 @@ def classify_screen_text(text):
 # Cropping distinct overlays avoids matching moving monsters/backgrounds.
 REF_REGIONS = {
     "start": (0.54, 0.44, 0.83, 0.58),
-    "switch": (0.27, 0.46, 0.75, 0.65),
+    "switch": (0.25, 0.22, 0.75, 0.65),
     "complete": (0.29, 0.26, 0.73, 0.41),
     "failure": (0.29, 0.26, 0.73, 0.41),
     "blessing": (0.30, 0.03, 0.71, 0.14),
@@ -1064,6 +1098,12 @@ def _crop(frame, kind, cv2):
     x1,y1,x2,y2 = REF_REGIONS[kind]
     return cv2.cvtColor(frame[int(y1*h):int(y2*h),int(x1*w):int(x2*w)],
                         cv2.COLOR_BGR2GRAY)
+
+
+def _bright_abyss_text(frame, cv2):
+    """Compare the bright UI lettering separately from moving game scenery."""
+    hsv = cv2.cvtColor(frame,cv2.COLOR_BGR2HSV)
+    return cv2.inRange(hsv,(0,0,185),(179,150,255))
 
 
 def load_reference_bank(references):
@@ -1083,38 +1123,50 @@ def load_reference_bank(references):
             template = _crop(frame,kind,cv2)
             if template.size < 100:
                 raise ValueError("Invalid reference crop: "+path)
-            templates[kind].append(template)
+            x1,y1,x2,y2=REF_REGIONS[kind]
+            color_region=frame[int(y1*540):int(y2*540),int(x1*960):int(x2*960)]
+            bright_mask=_bright_abyss_text(color_region,cv2)
+            templates[kind].append((template,bright_mask))
     return templates
 
 
 def match_reference(frame, templates, threshold=.82):
-    """Compare each labelled example to its own UI region, independently.
+    """Find event screenshots using grayscale and stable lettering.
 
-    A high threshold avoids mistaking generic gold overlays for successes.
-    Multiple examples per category are supported; no generic color-only success.
+    Bright UI text can remain identical while backgrounds/HUD change between
+    scenes. Match those foreground letters as a separate cue, alongside the
+    existing grayscale matcher. Reject empty masks as invalid evidence.
     """
     import cv2
-    standardized = cv2.resize(frame, (960, 540), interpolation=cv2.INTER_AREA)
-    best_kind, best_score = None, 0.0
-    for kind, images in templates.items():
-        if kind == "blessing":
+    standard=cv2.resize(frame,(960,540),interpolation=cv2.INTER_AREA)
+    best_kind,best_score=None,0.
+    for kind,examples in templates.items():
+        if kind=="blessing" or not examples:
             continue
-        if not images:
-            continue
-        crop = cv2.GaussianBlur(_crop(standardized,kind,cv2),(3,3),0)
-        for template in images:
-            reference = cv2.GaussianBlur(template,(3,3),0)
-            # Padded local search tolerates HUD motion / capture offsets.
-            pad_x = max(5, int(crop.shape[1]*.09))
-            pad_y = max(3, int(crop.shape[0]*.12))
-            region = cv2.copyMakeBorder(crop,pad_y,pad_y,pad_x,pad_x,
-                                        cv2.BORDER_REPLICATE)
-            result = cv2.matchTemplate(region, reference,
-                                       cv2.TM_CCOEFF_NORMED)
-            score = float(cv2.minMaxLoc(result)[1])
+        x1,y1,x2,y2=REF_REGIONS[kind]
+        roi=standard[int(y1*540):int(y2*540),int(x1*960):int(x2*960)]
+        gray=cv2.GaussianBlur(cv2.cvtColor(roi,cv2.COLOR_BGR2GRAY),(3,3),0)
+        white=_bright_abyss_text(roi,cv2)
+        px=max(5,int(gray.shape[1]*.09))
+        py=max(3,int(gray.shape[0]*.12))
+        gray_area=cv2.copyMakeBorder(gray,py,py,px,px,cv2.BORDER_REPLICATE)
+        white_area=cv2.copyMakeBorder(white,py,py,px,px,
+                                     cv2.BORDER_CONSTANT,value=0)
+        for item in examples:
+            ref,mask=item if isinstance(item,tuple) else (item,None)
+            ref=cv2.GaussianBlur(ref,(3,3),0)
+            score=float(cv2.minMaxLoc(cv2.matchTemplate(
+                gray_area,ref,cv2.TM_CCOEFF_NORMED))[1])
+            if mask is not None:
+                density=float(cv2.countNonZero(mask))/max(1,mask.size)
+                if .003 <= density <= .35:
+                    text_score=float(cv2.minMaxLoc(cv2.matchTemplate(
+                        white_area,mask,cv2.TM_CCOEFF_NORMED))[1])
+                    if math.isfinite(text_score):
+                        score=max(score,text_score)
             if math.isfinite(score) and score>best_score:
-                best_score,best_kind=score,kind
-    return (best_kind, round(best_score,3)) if best_score>=threshold else (None,best_score)
+                best_kind,best_score=kind,score
+    return (best_kind,round(best_score,3)) if best_score>=threshold else (None,best_score)
 
 
 def collapse_events(events, gap=5.0):
@@ -1284,8 +1336,10 @@ def scan_abyss_recording(path,references,progress=None,cancel=None,sample_second
         if progress:progress(1.)
         events=collapse_events(events)
         output=build_abyss_segments(events,footage,duration)
+        counts={kind:sum(item["kind"]==kind for item in events)
+                for kind in REFERENCE_KINDS}
         return {"path":str(footage),"duration":duration,"ocr_available":bool(ocr),
-                "events":events,**output}
+                "events":events,"event_counts":counts,**output}
     finally:
         cap.release()
 
@@ -1309,8 +1363,10 @@ def scan_full_run(paths,references,progress=None,cancel=None,sample_seconds=1.0)
         segments.extend(report["segments"])
         reports.append(report)
     if progress:progress(1.)
+    counts={kind:sum(item.get("kind")==kind for report in reports
+                     for item in report.get("events",[])) for kind in REFERENCE_KINDS}
     return {"mode":"Full Run","segments":segments,"reports":reports,
-            "completed_chambers":chamber-1}
+            "event_counts":counts,"completed_chambers":chamber-1}
 
 
 def validate_full_run_segments(segments):
@@ -1379,7 +1435,7 @@ def render_full_run(segments,destination,preset_name,music="",progress=None,
     if preset_name and preset_name!="Use last-used settings":
         if preset_name not in prefs["presets"]:
             raise ValueError("Saved Quality Lab preset not found: "+preset_name)
-        base=quality.decode_settings(prefs["presets"][preset_name])
+        base=quality.resolve_saved_render_preset(preset_name)
     elif prefs.get("last_used"):
         base=quality.decode_settings(prefs["last_used"])
     else:

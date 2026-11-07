@@ -20,7 +20,7 @@ from pathlib import Path
 REPOSITORY = 'cazymf/Cazy-Studio'
 API_URL = 'https://api.github.com/repos/' + REPOSITORY + '/releases/latest'
 PRODUCT = 'CazyStudio'
-APP_VERSION = '0.3.12'
+APP_VERSION = '0.3.13'
 MAX_ZIP_BYTES = 120 * 1024 * 1024
 MAX_UNPACKED_BYTES = 230 * 1024 * 1024
 MAX_FILES = 80

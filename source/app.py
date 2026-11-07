@@ -44,7 +44,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.12  |  AutoDirector Full Run')
+        self.title('Cazy Studio v0.3.13  |  Preset Display and Detection Diagnostics')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
@@ -711,16 +711,28 @@ class Studio(tk.Tk):
     def open_update_center(self):
         update_center.open_update_center(self)
 
-    def open_quality_lab(self):
+    def open_quality_lab(self, selected_preset=None, source_path=None):
+        # Opening Quality Lab from AutoDirector must show its selected recipe,
+        # rather than the last-used or hardcoded default settings.
+        if selected_preset is None and self.active_section == 'autodirector':
+            selected_preset = self.autodirector_view.preset_var.get()
+            if source_path is None:
+                i = self.autodirector_view._selected()
+                if i >= 0:
+                    source_path = self.autodirector_view.state['queue'][i]['path']
         if self.quality_lab_window is not None:
             try:
                 if self.quality_lab_window.winfo_exists():
+                    if source_path and Path(source_path).is_file():
+                        self.quality_lab_window.load_path(source_path)
+                    if selected_preset and selected_preset != 'Use last-used settings':
+                        self.quality_lab_window.apply_named_preset(selected_preset)
                     self.quality_lab_window.lift()
                     return
             except tk.TclError:pass
-        preferred=None
+        preferred=source_path if source_path and Path(source_path).is_file() else None
         timeline_clip=None
-        if 0<=self.selected<len(self.project.clips):
+        if preferred is None and 0<=self.selected<len(self.project.clips):
             clip=self.project.clips[self.selected]
             if clip.kind=='video':
                 preferred=clip.path
@@ -729,7 +741,8 @@ class Studio(tk.Tk):
             for p in self.media_paths:
                 if engine.kind_for(p)=='video' and os.path.isfile(p):
                     preferred=p;break
-        self.quality_lab_window=quality_ui.QualityLab(self,preferred,timeline_clip=timeline_clip)
+        self.quality_lab_window=quality_ui.QualityLab(
+            self,preferred,timeline_clip=timeline_clip,selected_preset=selected_preset)
 
     def _close_cached_capture(self):
         # A worker thread owns the video capture. Never release it on the UI thread.
@@ -1279,9 +1292,16 @@ class AutoDirectorView(tk.Frame):
         self.preset_combo = self._combo(options, self.preset_var,
                                        ('Use last-used settings',))
         self.preset_combo.pack(fill='x', padx=15, pady=(4, 4))
+        self.preset_combo.bind('<<ComboboxSelected>>', self.on_saved_preset_change)
         self._button(options, 'Reload Saved Presets', self.reload_presets).pack(anchor='w', padx=15, pady=(0, 4))
+        self._button(options, 'View / Edit Saved Recipe in Quality Lab',
+                     self.open_selected_preset_in_quality_lab).pack(anchor='w', padx=15, pady=(0, 4))
         self.preset_hint = self._label(options, 'Loading named presets...', 9, MUTED)
-        self.preset_hint.pack(anchor='w', padx=15, pady=(0, 9))
+        self.preset_hint.pack(anchor='w', padx=15, pady=(0, 4))
+        self.recipe_details_var = tk.StringVar(value='Choose a saved recipe to preview its settings.')
+        tk.Label(options, textvariable=self.recipe_details_var, bg=CARD2, fg=TEXT,
+                 font=('Segoe UI', 9), anchor='w', justify='left',
+                 wraplength=310, padx=10, pady=8).pack(fill='x', padx=15, pady=(0, 10))
         self._label(options, 'ABYSS DETECTION REFERENCES', 11, ACCENT2, True).pack(anchor='w', padx=15, pady=(0, 5))
         self._button(options, 'Manage Multiple Screenshots', self.manage_references).pack(anchor='w', padx=15)
         self.reference_hint = self._label(options, 'Start / Other Side / Completed', 9, MUTED)
@@ -1351,10 +1371,12 @@ class AutoDirectorView(tk.Frame):
         if self.preset_var.get() not in names:
             self.preset_var.set(names[0])
         self.preset_hint.configure(text=f'{len(names)-1} saved Quality Lab presets')
+        self.update_saved_recipe_details()
         references = autodirector_fullrun.normalize_references(
             self.state.get('references',{}),self.state.get('success_reference',''))
-        self.reference_hint.configure(text='  •  '.join(
-            f'{key}: {len(references[key])}' for key in ('start','switch','complete')))
+        self.reference_hint.configure(text='Saved screenshot examples (not detections): ' +
+            ' / '.join(f'{key} {len(references[key])}'
+                     for key in ('start','switch','complete')))
         self._update_details()
 
     def _selected(self):
@@ -1506,6 +1528,29 @@ class AutoDirectorView(tk.Frame):
             f'{count} selected video(s) prepared with local music assignments. '
             'Choose a selected video and click SCAN SELECTED VIDEO to test detection.')
 
+
+    def on_saved_preset_change(self, event=None):
+        self.save()
+        self.update_saved_recipe_details()
+
+    def update_saved_recipe_details(self):
+        try:
+            selected = self.preset_var.get()
+            recipe = quality_engine.resolve_saved_render_preset(selected)
+            self.recipe_details_var.set(
+                f'{selected or "Use last-used settings"}\n'
+                f'{recipe.resolution}  |  '
+                f'{recipe.fps if recipe.fps else "Source"} FPS\n'
+                f'{recipe.upscale}  |  {recipe.frame_method}\n'
+                f'{recipe.encoder}  |  {recipe.quality}')
+        except (OSError, ValueError) as exc:
+            self.recipe_details_var.set('Cannot read saved preset: ' + str(exc))
+
+    def open_selected_preset_in_quality_lab(self):
+        name = self.preset_var.get()
+        i = self._selected()
+        source_path = self.state['queue'][i]['path'] if i >= 0 else None
+        self.winfo_toplevel().open_quality_lab(selected_preset=name,source_path=source_path)
 
     def reload_presets(self):
         previous = self.preset_var.get()
@@ -1815,6 +1860,17 @@ class AutoDirectorView(tk.Frame):
             return
         refs=autodirector_fullrun.normalize_references(
             self.state.get('references',{}),self.state.get('success_reference',''))
+        missing=[kind for kind in ('start','switch','complete') if not refs[kind]]
+        if missing and not quality_engine._cazy_tesseract():
+            readable=', '.join(autodirector_fullrun.REFERENCE_KINDS[k] for k in missing)
+            self.status_var.set('Add missing Abyss detection screenshots: '+readable)
+            if messagebox.askyesno('Missing detection screenshots',
+                'Full Run needs examples of all three chamber transitions '
+                'unless Tesseract OCR is installed.\n\n'
+                'Missing: '+readable+'\n\n'
+                'Open screenshot library to add examples now?',parent=self):
+                self.manage_references()
+            return
         self._auto_busy=True
         self._auto_cancel.clear()
         self.status_var.set(f'Scanning ALL {len(paths)} selected recording(s) in queue order…')
@@ -1828,7 +1884,71 @@ class AutoDirectorView(tk.Frame):
                 self._auto_messages.put(('error',str(exc)))
         threading.Thread(target=work,daemon=True).start()
 
+    def show_detection_report(self,result):
+        """Explain zero clips using *actual detected events*, not saved images."""
+        win=tk.Toplevel(self)
+        win.title('AutoDirector — Detection Report')
+        win.geometry('850x570')
+        win.minsize(670,450)
+        win.configure(bg=BG)
+        body=tk.Frame(win,bg=BG)
+        body.pack(fill='both',expand=True,padx=18,pady=14)
+        self._label(body,'FULL RUN SCAN REPORT',17,ACCENT2,True).pack(anchor='w')
+        self._label(body,f'{len(result.get("reports",[]))} recording(s) scanned  '
+                         f'•  {result.get("completed_chambers",0)} completed chamber(s)',
+                    10,TEXT,True).pack(anchor='w',pady=(8,7))
+        counts=result.get('event_counts',{})
+        if not counts:
+            counts={k:sum(e.get('kind')==k for report in result.get('reports',[])
+                          for e in report.get('events',[]))
+                    for k in ('start','switch','complete','failure')}
+        stats=('ACTUALLY DETECTED IN VIDEO:  '
+               f'Start {counts.get("start",0)}  •  '
+               f'Other Side {counts.get("switch",0)}  •  '
+               f'Completed {counts.get("complete",0)}  •  '
+               f'Failed {counts.get("failure",0)}')
+        self._label(body,stats,10,ACCENT2,True).pack(anchor='w',pady=(0,8))
+        hints=[]
+        if not result.get('segments'):
+            hints.append('No complete chamber sequence was found. Nothing will be rendered.')
+        if not counts.get('switch',0):
+            hints.append('No "On the other side..." transition was detected.')
+        if not counts.get('start',0):
+            hints.append('No "Start Challenge" prompt was detected.')
+        if not counts.get('complete',0):
+            hints.append('No "Challenge Completed" screen was detected.')
+        for report in result.get('reports',[]):
+            for note in report.get('notes',[]):
+                hints.append(Path(report.get('path','video')).name+': '+note)
+        if not hints:
+            hints.append('Review the proposed half clips and their cut boundaries.')
+        tk.Label(body,text='\n'.join(hints[:9]),bg=CARD2,fg=YELLOW,
+                 font=('Segoe UI',9),justify='left',anchor='w',
+                 wraplength=790,padx=12,pady=10).pack(fill='x',pady=(0,10))
+        self._label(body,'Detected game events (video timestamps)',10,TEXT,True).pack(anchor='w')
+        tree=ttk.Treeview(body,columns=('video','time','event','how'),show='headings')
+        for col,label,width in [('video','RECORDING',230),('time','TIME (s)',86),
+                                ('event','EVENT',135),('how','DETECTION METHOD',270)]:
+            tree.heading(col,text=label)
+            tree.column(col,width=width,anchor='w')
+        tree.pack(fill='both',expand=True,pady=(6,10))
+        for report in result.get('reports',[]):
+            for event in report.get('events',[]):
+                tree.insert('',tk.END,values=(
+                    Path(report.get('path','')).name,event.get('at',''),
+                    event.get('kind','').upper(),event.get('evidence','')))
+        bottom=tk.Frame(body,bg=BG)
+        bottom.pack(fill='x')
+        self._button(bottom,'Manage Screenshot Examples',
+                     lambda:(win.destroy(),self.manage_references())).pack(side='left')
+        self._button(bottom,'Scan Again',
+                     lambda:(win.destroy(),self.scan_entire_full_run())).pack(side='left',padx=7)
+        self._button(bottom,'Close',win.destroy).pack(side='right')
+
     def review_full_run(self,result):
+        if not result.get('segments'):
+            self.show_detection_report(result)
+            return
         if self._review_window is not None and self._review_window.winfo_exists():
             self._review_window.destroy()
         win=tk.Toplevel(self)
@@ -2000,6 +2120,8 @@ class AutoDirectorView(tk.Frame):
         self._button(buttons,'Enable / Disable',toggle).pack(side='left',padx=(0,6))
         self._button(buttons,'Preview Source',preview).pack(side='left',padx=(0,6))
         self._button(buttons,'+ Manual Half',add_manual).pack(side='left')
+        self._button(buttons,'Scan Report',lambda:self.show_detection_report(result)).pack(
+            side='left',padx=6)
         self._button(buttons,'RENDER ONE FULL RUN',export,True).pack(side='right')
         if segments:
             table.selection_set('0')
