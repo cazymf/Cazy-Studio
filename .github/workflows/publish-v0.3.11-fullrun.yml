@@ -1,0 +1,81 @@
+name: Publish Cazy Studio v0.3.11 AutoDirector Full Run
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0.3.11-fullrun.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg
+      - name: Test full-chamber detection, queue ordering, concat and UI
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Build safe update and verify rollback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cazy311/old" "$RUNNER_TEMP/cazy311/stage" "$RUNNER_TEMP/cazy311/out"
+          gh release download v0.3.10 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_10_Update.zip' --dir "$RUNNER_TEMP/cazy311/old"
+          cp source/app.py source/autodirector_fullrun.py source/quality_engine.py \
+            source/quality_ui.py source/update_core.py source/version.py "$RUNNER_TEMP/cazy311/stage"
+          PYTHONPATH=source python - <<'PY'
+          from pathlib import Path
+          import os,tempfile,zipfile
+          from update_core import build_update_zip,inspect_update_zip,apply_update_zip,rollback_latest
+          root=Path(os.environ['RUNNER_TEMP'])/'cazy311'
+          old=root/'old/Cazy_Studio_v0_3_10_Update.zip'
+          update=root/'out/Cazy_Studio_v0_3_11_Update.zip'
+          prior=inspect_update_zip(old,'0.3.10')
+          new=build_update_zip(root/'stage',update,'0.3.11')
+          assert set(new['files'])=={
+              'app.py','autodirector_fullrun.py','quality_engine.py',
+              'quality_ui.py','update_core.py','version.py'}
+          with tempfile.TemporaryDirectory() as folder:
+              dest=Path(folder)
+              with zipfile.ZipFile(old) as archive:
+                  for filename in prior['files']:
+                      (dest/filename).write_bytes(archive.read(filename))
+              apply_update_zip(update,dest,'0.3.11')
+              assert (dest/'autodirector_fullrun.py').read_bytes()==Path('source/autodirector_fullrun.py').read_bytes()
+              assert (dest/'version.py').read_text().strip()=="APP_VERSION = '0.3.11'"
+              rollback_latest(dest)
+              assert (dest/'version.py').read_text().strip()=="APP_VERSION = '0.3.10'"
+              assert not (dest/'autodirector_fullrun.py').exists()
+          print('Safe v0.3.11 update installation and rollback: PASS')
+          PY
+      - name: Publish verified update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy311/out"
+          if gh release view v0.3.11 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.11 Cazy_Studio_v0_3_11_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.11 Cazy_Studio_v0_3_11_Update.zip \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.3.11 — Full Abyss Run, One Video' \
+              --notes 'AutoDirector Full Run now scans every selected OBS recording and recognizes Start Challenge, On the other side, the next Start Challenge, and Challenge Completed, repeating across all completed chambers. Each successful chamber yields first/second half edits; failed/retried and incomplete attempts are excluded. Review timestamps, enable or disable cuts, add manual halves, and export all accepted cuts as ONE joined MP4 using a Quality Lab saved preset. Also generates one thumbnail, editable title and cuts JSON. The detection screenshot library accepts multiple images per separate event type and preserves the old single completion screenshot. Original videos are never modified. No YouTube publishing or cloud APIs. Passed 30 synthetic, FFmpeg end-to-end, UI smoke and updater rollback tests. Actual Genshin gameplay detection remains a user-tested beta.'
+          fi
+          gh release edit v0.3.11 --repo "$GITHUB_REPOSITORY" --latest
+      - name: Archive the validated updater
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_11_Update
+          path: ${{ runner.temp }}/cazy311/out/Cazy_Studio_v0_3_11_Update.zip
