@@ -1498,5 +1498,212 @@ class AutoDirectorView(tk.Frame):
             'Choose a selected video and click SCAN SELECTED VIDEO to test detection.')
 
 
+    def reload_presets(self):
+        previous = self.preset_var.get()
+        self.refresh()
+        if previous != self.preset_var.get():
+            self.save()
+        self.status_var.set(f'Quality Lab presets loaded: {len(self.preset_combo["values"])-1}. '
+                            'Choose your saved recipe in the Render Preset dropdown.')
+
+    def choose_success_reference(self):
+        sample = filedialog.askopenfilename(
+            parent=self, title='Select a screenshot showing the Genshin completion screen',
+            filetypes=[('Images', '*.png *.jpg *.jpeg *.bmp')])
+        if sample:
+            self.state['success_reference'] = str(Path(sample).resolve())
+            self.save()
+            self.refresh()
+            self.status_var.set('Example success screenshot selected for future scans.')
+
+    def scan_selected(self):
+        selected = self._selected()
+        if selected < 0:
+            messagebox.showinfo('Select a video', 'Select one of your videos first.', parent=self)
+            return
+        if self._auto_busy:
+            messagebox.showinfo('AutoDirector busy', 'A scan or render is currently running.', parent=self)
+            return
+        path = self.state['queue'][selected]['path']
+        if not Path(path).is_file():
+            messagebox.showerror('Missing video', 'The selected video is missing.', parent=self)
+            return
+        reference = self.state.get('success_reference', '')
+        if reference and not Path(reference).is_file():
+            messagebox.showerror('Missing example screenshot', 'Please select a new success screenshot.', parent=self)
+            return
+        if not self.save():
+            return
+        self._auto_busy = True
+        self._auto_cancel.clear()
+        self.status_var.set('Scanning selected video for Genshin results…')
+
+        def background():
+            try:
+                results = quality_engine.cazy_detect_genshin(
+                    path, reference_path=reference,
+                    progress=lambda n: self._auto_messages.put(('progress', n)),
+                    cancel=self._auto_cancel)
+                self._auto_messages.put(('scan_done', results))
+            except Exception as exc:
+                self._auto_messages.put(('error', str(exc)))
+        threading.Thread(target=background, daemon=True).start()
+
+    def _poll_auto_messages(self):
+        try:
+            while True:
+                event, data = self._auto_messages.get_nowait()
+                if event == 'progress':
+                    self.status_var.set(f'Local fight scan: {100*data:.0f}%')
+                elif event == 'scan_done':
+                    self._auto_busy = False
+                    self.status_var.set(f'Found {len(data["candidates"])} possible result screens. Review suggested times.')
+                    self.review_results(data)
+                elif event == 'render_progress':
+                    pct, step = data
+                    self.status_var.set(f'Local rendering: {pct:.0f}% — {step}')
+                elif event == 'render_done':
+                    self._auto_busy = False
+                    self.status_var.set('Finished: ' + data['video'])
+                    messagebox.showinfo('AutoDirector finished',
+                        'Your local package is ready:\n\n' + '\n'.join(data.values()) +
+                        '\n\nNothing was uploaded.', parent=self)
+                elif event == 'error':
+                    self._auto_busy = False
+                    self.status_var.set('AutoDirector: ' + str(data))
+                    messagebox.showerror('AutoDirector', str(data), parent=self)
+        except queue.Empty:
+            pass
+        if self.winfo_exists():
+            self.after(150, self._poll_auto_messages)
+
+    def review_results(self, result):
+        if self._review_window is not None and self._review_window.winfo_exists():
+            self._review_window.destroy()
+        win = tk.Toplevel(self)
+        self._review_window = win
+        win.title('Cazy AutoDirector — Review Detected Cuts')
+        win.geometry('880x590')
+        win.minsize(660, 460)
+        win.configure(bg=BG)
+        win.transient(self.winfo_toplevel())
+        body = tk.Frame(win, bg=BG)
+        body.pack(fill='both', expand=True, padx=18, pady=15)
+        self._label(body, 'REVIEW DETECTED RESULTS', 17, ACCENT2, True).pack(anchor='w')
+        self._label(body, Path(result['path']).name, 10, TEXT, True).pack(anchor='w', pady=(6, 1))
+        self._label(body, f'Duration {result["duration"]:.1f}s  •  OCR '
+                    + ('available' if result['ocr_available'] else 'not installed')
+                    + '  •  Results may include failed attempts: verify manually.',
+                    9, YELLOW).pack(anchor='w', pady=(1, 10))
+        table = ttk.Treeview(body, show='headings',
+                             columns=('when','start','end','match','why'), height=8)
+        for key,label,width in [('when','SCREEN AT',90),('start','START',80),
+                                 ('end','END',80),('match','CONFIDENCE',100),
+                                 ('why','DETECTION EVIDENCE',390)]:
+            table.heading(key, text=label)
+            table.column(key, width=width, anchor='w')
+        table.pack(fill='both', expand=True)
+        for n, item in enumerate(result['candidates']):
+            table.insert('', tk.END, iid=str(n),
+                         values=(item['at'],item['start'],item['end'],
+                                 f'{item["confidence"]:.0%}',item['reason']))
+        if not result['candidates']:
+            self._label(body, 'No candidate found. Enter the desired cut times manually '
+                              'or choose a success screenshot and scan again.',
+                        9, YELLOW).pack(anchor='w', pady=5)
+        fields = tk.Frame(body, bg=BG)
+        fields.pack(fill='x', pady=(14, 8))
+        start_var = tk.StringVar(value=str(max(0, result['duration'] - 180)))
+        end_var = tk.StringVar(value=str(result['duration']))
+        self._label(fields,'START (seconds)',9,TEXT,True).pack(side='left')
+        tk.Entry(fields, width=12, textvariable=start_var, bg=CARD2, fg=TEXT,
+                 insertbackground=TEXT).pack(side='left', padx=(8,18), ipady=6)
+        self._label(fields,'END (seconds)',9,TEXT,True).pack(side='left')
+        tk.Entry(fields, width=12, textvariable=end_var, bg=CARD2, fg=TEXT,
+                 insertbackground=TEXT).pack(side='left', padx=8, ipady=6)
+
+        def pick(_event=None):
+            selection = table.selection()
+            if selection:
+                item = result['candidates'][int(selection[0])]
+                start_var.set(str(item['start']))
+                end_var.set(str(item['end']))
+        table.bind('<<TreeviewSelect>>', pick)
+        if result['candidates']:
+            table.selection_set('0')
+            pick()
+        self._label(body, 'Select a candidate, correct START/END, then render. '
+                          'Preset comes from your Quality Lab saved presets.',
+                    9, MUTED).pack(anchor='w', pady=(4, 11))
+        actions = tk.Frame(body, bg=BG)
+        actions.pack(fill='x')
+        self._button(actions, 'Preview Original', lambda: self._open_auto_source(result['path'])).pack(side='left')
+        self._button(actions, 'RENDER THIS CUT LOCALLY',
+                     lambda: self.render_reviewed(result,start_var.get(),end_var.get(),table),
+                     True).pack(side='right')
+        self._button(actions,'Close',win.destroy).pack(side='right',padx=8)
+
+    def _open_auto_source(self, path):
+        try:
+            if os.name == 'nt':
+                os.startfile(path)
+            else:
+                import sys
+                subprocess.Popen(['open' if sys.platform == 'darwin' else 'xdg-open',path])
+        except (OSError,AttributeError) as exc:
+            messagebox.showerror('Preview error',str(exc),parent=self)
+
+    def render_reviewed(self, result, begin, finish, table):
+        if self._auto_busy:
+            messagebox.showinfo('Busy','Another AutoDirector job is running.',parent=self)
+            return
+        try:
+            start, end = float(begin),float(finish)
+            if not (0 <= start < end <= result['duration']+.15):
+                raise ValueError('Times must be between zero and the recording duration.')
+        except ValueError as exc:
+            messagebox.showerror('Invalid cut',str(exc),parent=self)
+            return
+        preset = self.preset_var.get()
+        try:
+            prefs = quality_engine.load_preferences()
+            if preset and preset != 'Use last-used settings' and preset not in prefs['presets']:
+                raise ValueError('Saved preset not found. Click Reload Saved Presets first.')
+        except (ValueError,OSError) as exc:
+            messagebox.showerror('Render preset error',str(exc),parent=self)
+            return
+        folder = filedialog.askdirectory(parent=self,title='Choose a local folder for finished video + thumbnail + title')
+        if not folder:
+            return
+        if not messagebox.askyesno('Confirm local render',
+            f'Cut: {start:.1f}s → {end:.1f}s\n'
+            f'Preset: {preset or "Use last-used settings"}\n'
+            f'Destination: {folder}\n\n'
+            'Render locally? Your original video is unchanged; nothing is uploaded.',
+            parent=self):
+            return
+        self.save()
+        source = result['path']
+        assigned = next((j.get('music','') for j in self.state['queue']
+                         if j['path'] == source), '')
+        selection = table.selection()
+        matched_time = (result['candidates'][int(selection[0])]['at']
+                        if selection else None)
+        self._auto_busy = True
+        def background():
+            try:
+                output = quality_engine.cazy_render_local_package(
+                    source, start, end, folder, preset,
+                    music=assigned, success_at=matched_time,
+                    cancel=self._auto_cancel,
+                    progress=lambda pct,label: self._auto_messages.put(('render_progress',(pct,label))))
+                self._auto_messages.put(('render_done',output))
+            except Exception as exc:
+                self._auto_messages.put(('error',str(exc)))
+        threading.Thread(target=background,daemon=True).start()
+        if self._review_window is not None and self._review_window.winfo_exists():
+            self._review_window.destroy()
+
+
 if __name__=='__main__':
     Studio().mainloop()
