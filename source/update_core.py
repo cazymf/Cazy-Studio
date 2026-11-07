@@ -20,14 +20,14 @@ from pathlib import Path
 REPOSITORY = 'cazymf/Cazy-Studio'
 API_URL = 'https://api.github.com/repos/' + REPOSITORY + '/releases/latest'
 PRODUCT = 'CazyStudio'
-APP_VERSION = '0.3.10'
+APP_VERSION = '0.3.11'
 MAX_ZIP_BYTES = 120 * 1024 * 1024
 MAX_UNPACKED_BYTES = 230 * 1024 * 1024
 MAX_FILES = 80
 BACKUP_DIR = '.cazy-update-backups'
 BACKUP_STATE = '.cazy-last-update.json'
 SAFE_FILES = {
-    'Cazy Studio.exe', 'app.py', 'preview_worker.py', 'engine.py', 'quality_engine.py', 'quality_ui.py',
+    'Cazy Studio.exe', 'app.py', 'preview_worker.py', 'engine.py', 'quality_engine.py', 'quality_ui.py', 'autodirector_fullrun.py',
     'install_ai_addons.py', 'update_center.py', 'update_core.py', 'update_worker.py',
     'version.py', 'requirements.txt', 'launcher_windows.go',
     'Setup_Cazy_Studio.bat', 'Start_Cazy_Studio.bat', 'Launch Cazy Studio.vbs',
