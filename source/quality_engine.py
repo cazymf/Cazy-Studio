@@ -740,17 +740,19 @@ def _cazy_classify_text(text):
     return None
 
 
-def _cazy_tesseract():
-    """Find optional local OCR executable without an API or network call."""
+def _cazy_tesseract(override=''):
+    """Find a local Tesseract executable; never require an online service."""
     import shutil
-    program = shutil.which('tesseract')
+    if override:
+        return str(Path(override)) if Path(override).is_file() else None
+    program=shutil.which('tesseract')
     if program:
         return program
-    if os.name == 'nt':
-        for key in ('ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA'):
-            base = os.environ.get(key)
-            if base:
-                candidate = Path(base) / 'Tesseract-OCR' / 'tesseract.exe'
+    if os.name=='nt':
+        for key in ('ProgramFiles','ProgramFiles(x86)','LOCALAPPDATA'):
+            folder=os.environ.get(key)
+            if folder:
+                candidate=Path(folder)/'Tesseract-OCR'/'tesseract.exe'
                 if candidate.is_file():
                     return str(candidate)
     return None
@@ -1065,21 +1067,95 @@ def normalize_references(references=None, old_success=""):
 
 
 def classify_screen_text(text):
-    """Strict enough not to call a floor/benediction screen a completion."""
-    simple = " ".join(re.sub(r"[^a-z0-9 ]", " ", str(text).lower()).split())
-    if any(s in simple for s in ("challenge failed", "challenge failure",
-                                  "challenge interrupted", "challenge ended",
-                                  "challenge defeat")):
-        return "failure"
-    if any(s in simple for s in ("on the other side", "other side")):
-        return "switch"
-    if any(s in simple for s in ("challenge completed", "challenge complete")):
-        return "complete"
-    if any(s in simple for s in ("start challenge", "challenge started")):
-        return "start"
-    if ("floor" in simple and "chamber" in simple) or "benediction" in simple:
-        return "blessing"
+    """Extract Abyss event phrases from local OCR results only.
+
+    Text is compared as phrases, not by matching reference screenshots or
+    the color of game overlays. Minor single-character OCR errors are
+    tolerated on short, nearby word groups.
+    """
+    from difflib import SequenceMatcher
+    normalized=" ".join(re.sub(r"[^a-z0-9]+"," ",str(text).lower()).split())
+    if not normalized:
+        return None
+    triggers=(
+        ('failure',('challenge failed','challenge failure','challenge interrupted')),
+        ('switch',('on the other side','the other side')),
+        ('complete',('challenge completed','challenge complete')),
+        ('start',('start challenge','challenge started')),
+    )
+    for kind,phrases in triggers:
+        if any(phrase in normalized for phrase in phrases):
+            return kind
+    tokens=normalized.split()
+    for kind,phrases in triggers:
+        for phrase in phrases:
+            n=len(phrase.split())
+            for count in (n,n+1):
+                for pos in range(max(0,len(tokens)-count+1)):
+                    piece=' '.join(tokens[pos:pos+count])
+                    if abs(len(piece)-len(phrase))>3:
+                        continue
+                    if SequenceMatcher(None,piece,phrase).ratio()>=.88:
+                        return kind
+    if ('floor' in normalized and 'chamber' in normalized) or 'benediction' in normalized:
+        return 'blessing'
     return None
+
+
+def _abyss_text_regions(frame,cv2):
+    """Look where Genshin displays the interaction prompt and banners."""
+    h,w=frame.shape[:2]
+    for label,(x1,y1,x2,y2) in (
+        ('mechanism',(0.48,.42,.88,.64)),
+        ('center banner',(.18,.18,.85,.68)),
+    ):
+        crop=frame[int(y1*h):int(y2*h),int(x1*w):int(x2*w)]
+        if crop.size==0:
+            continue
+        gray=cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
+        gray=cv2.resize(gray,None,fx=1.75,fy=1.75,
+                        interpolation=cv2.INTER_CUBIC)
+        yield label,gray
+
+
+def read_abyss_frame_text(frame,executable,cancel=None):
+    """Recognize Start Challenge / On the other side / Challenge Completed.
+
+    Tesseract processes only local frames; no screenshot examples or cloud.
+    Multiple binarization styles help when a combat background changes.
+    """
+    import cv2
+    if not executable:
+        raise RuntimeError('Text detection needs Tesseract OCR. Locate tesseract.exe in AutoDirector.')
+    for label,gray in _abyss_text_regions(frame,cv2):
+        for attempt in range(2):
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError('Scan cancelled')
+            sample=(gray if attempt==0 else cv2.threshold(
+                gray,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1])
+            ok,png=cv2.imencode('.png',sample)
+            if not ok:
+                continue
+            try:
+                result=subprocess.run(
+                    [executable,'stdin','stdout','--psm','11' if attempt==0 else '6',
+                     '-l','eng'],input=png.tobytes(),capture_output=True,
+                    timeout=7,check=False)
+            except subprocess.TimeoutExpired:
+                continue
+            except OSError as exc:
+                raise RuntimeError('Could not run local Tesseract: '+str(exc)) from exc
+            if result.returncode:
+                stderr=result.stderr.decode('utf-8','replace')
+                if 'Error opening data file' in stderr:
+                    raise RuntimeError('Tesseract English OCR language data is missing.')
+                continue
+            raw=result.stdout.decode('utf-8','replace')
+            kind=classify_screen_text(raw)
+            if kind in ('start','switch','complete','failure'):
+                evidence='OCR text (%s): %s'%(label,' '.join(raw.split())[:100])
+                return kind,.97,evidence
+    return None,0.,''
 
 
 # Crop screen regions by event, relative to a 960x540 standardized frame.
@@ -1219,20 +1295,20 @@ def build_abyss_segments(events,source,duration,first_chamber=1):
             continue
         if kind=="start":
             if state=="waiting":
-                first_start=max(0.,at)
+                first_start=max(0.,at-2.0)
                 state="first"
             elif state=="between":
-                second_start=max(0.,at)
+                second_start=max(0.,at-2.0)
                 state="second"
             elif state=="first" and at-last_start>8:
                 # A second attempt started before a valid side switch.
                 discarded+=1
-                first_start=max(0.,at)
+                first_start=max(0.,at-2.0)
                 first_end=second_start=switch_at=None
             elif state=="second" and at-last_start>8:
                 discarded+=1
                 state="first"
-                first_start=max(0.,at)
+                first_start=max(0.,at-2.0)
                 first_end=second_start=switch_at=None
             last_start=at
             continue
@@ -1278,95 +1354,95 @@ def build_abyss_segments(events,source,duration,first_chamber=1):
             "discarded_attempts":discarded,"notes":notes}
 
 
-def scan_abyss_recording(path,references,progress=None,cancel=None,sample_seconds=1.0):
-    """Scan the whole file; do not stop at the first completion event."""
+def scan_abyss_recording(path,references=None,progress=None,cancel=None,
+                         sample_seconds=.8,ocr_path=''):
+    """Read the whole recording's printed game text using offline OCR.
+
+    Prior screenshot references remain in saved user data for compatibility,
+    but they are NEVER used as event triggers in text detection mode.
+    """
     import cv2
     footage=Path(path)
     if not footage.is_file():
         raise FileNotFoundError(str(footage))
-    refs=load_reference_bank(references)
-    ocr=quality._cazy_tesseract()
-    if not any(refs.values()) and not ocr:
-        raise RuntimeError("Add screenshot references for Start Challenge, "
-                           "On the other side and Challenge Completed, "
-                           "or install Tesseract OCR first.")
+    executable=_cazy_tesseract(ocr_path)
+    if not executable:
+        raise RuntimeError('Text detection requires Tesseract OCR. Use Locate Tesseract in AutoDirector.')
     cap=cv2.VideoCapture(str(footage))
     if not cap.isOpened():
-        raise RuntimeError("Could not open video: "+footage.name)
+        raise RuntimeError('Could not open recording: '+footage.name)
     try:
-        fps=float(cap.get(cv2.CAP_PROP_FPS) or 0)
-        total_frames=int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        duration=total_frames/fps if fps>0 else 0
-        if duration<=0 or not math.isfinite(duration):
-            raise RuntimeError("Invalid video duration")
+        fps=float(cap.get(cv2.CAP_PROP_FPS) or 0.)
+        frames=int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration=frames/fps if fps>0 else 0.
+        if not math.isfinite(duration) or duration<=0:
+            raise RuntimeError('Cannot determine recording duration')
+        interval=max(.4,min(2.,float(sample_seconds)))
         events=[]
-        step=max(.4,min(3.,float(sample_seconds)))
         t=0.
+        last_kind=None
+        last_seen=-100.
         while t<duration:
             if cancel is not None and cancel.is_set():
-                raise RuntimeError("Scan cancelled")
-            cap.set(cv2.CAP_PROP_POS_MSEC, t*1000)
+                raise RuntimeError('Scan cancelled')
+            cap.set(cv2.CAP_PROP_POS_MSEC,t*1000.)
             ok,frame=cap.read()
             if ok:
-                kind,confidence=match_reference(frame,refs)
-                evidence="Screenshot reference"
-                if kind is None and ocr:
-                    h,w=frame.shape[:2]
-                    # Prompt + central overlay; do NOT gate OCR on gold pixels.
-                    center=frame[int(h*.21):int(h*.67),int(w*.14):int(w*.90)]
-                    encoded,binary=cv2.imencode('.png',center)
-                    if encoded:
-                        try:
-                            run=subprocess.run([ocr,'stdin','stdout','--psm','11','-l','eng'],
-                                               input=binary.tobytes(),
-                                               capture_output=True,timeout=6)
-                            recognized=classify_screen_text(
-                                run.stdout.decode('utf-8','replace'))
-                            if recognized:
-                                kind,confidence,evidence=recognized,.97,"Recognized game text"
-                        except (OSError,subprocess.TimeoutExpired):
-                            pass
+                kind,confidence,evidence=read_abyss_frame_text(
+                    frame,executable,cancel=cancel)
                 if kind:
-                    events.append({"at":round(t,2),"kind":kind,
-                                   "confidence":round(confidence,3),
-                                   "evidence":evidence})
+                    # OCR may see the same prompt on many consecutive frames.
+                    # Keep the *first* time it appeared, never the last.
+                    if kind!=last_kind or t-last_seen>4.0:
+                        events.append({'at':round(t,2),'kind':kind,
+                                       'confidence':confidence,'evidence':evidence})
+                    last_kind,last_seen=kind,t
+                elif t-last_seen>4.0:
+                    last_kind=None
             if progress:
                 progress(min(1.,t/duration))
-            t+=step
-        if progress:progress(1.)
+            t+=interval
+        if progress:
+            progress(1.)
         events=collapse_events(events)
         output=build_abyss_segments(events,footage,duration)
-        counts={kind:sum(item["kind"]==kind for item in events)
+        counts={kind:sum(item.get('kind')==kind for item in events)
                 for kind in REFERENCE_KINDS}
-        return {"path":str(footage),"duration":duration,"ocr_available":bool(ocr),
-                "events":events,"event_counts":counts,**output}
+        return {'path':str(footage),'duration':duration,
+                'ocr_available':True,'detection_method':'Local text OCR',
+                'events':events,'event_counts':counts,**output}
     finally:
         cap.release()
 
 
-def scan_full_run(paths,references,progress=None,cancel=None,sample_seconds=1.0):
-    """Scan ALL user-selected recordings in their explicitly chosen order."""
+def scan_full_run(paths,references=None,progress=None,cancel=None,
+                  sample_seconds=.8,ocr_path=''):
+    """Scan every user-selected recording, preserving queue and chamber order."""
     paths=list(paths)
     if not paths:
-        raise ValueError("Add selected recordings first")
+        raise ValueError('Add selected OBS recordings before scanning')
     segments=[]
     reports=[]
     chamber=1
     for i,path in enumerate(paths):
         report=scan_abyss_recording(
             path,references,cancel=cancel,sample_seconds=sample_seconds,
-            progress=(lambda value,offset=i:
-                      progress((offset+value)/len(paths))) if progress else None)
-        for seg in report["segments"]:
-            seg["chamber"]+=chamber-1
-        chamber+=report["completed_chambers"]
-        segments.extend(report["segments"])
+            ocr_path=ocr_path,
+            progress=(lambda fraction,j=i:
+                      progress((j+fraction)/len(paths))) if progress else None)
+        for seg in report['segments']:
+            seg['chamber']+=chamber-1
+        chamber+=report['completed_chambers']
+        segments.extend(report['segments'])
         reports.append(report)
-    if progress:progress(1.)
-    counts={kind:sum(item.get("kind")==kind for report in reports
-                     for item in report.get("events",[])) for kind in REFERENCE_KINDS}
-    return {"mode":"Full Run","segments":segments,"reports":reports,
-            "event_counts":counts,"completed_chambers":chamber-1}
+    if progress:
+        progress(1.)
+    counts={kind:sum(event.get('kind')==kind for report in reports
+                     for event in report.get('events',[]))
+            for kind in REFERENCE_KINDS}
+    return {'mode':'Full Run','detection_method':'Local text OCR',
+            'segments':segments,'reports':reports,
+            'event_counts':counts,'completed_chambers':chamber-1}
 
 
 def validate_full_run_segments(segments):
