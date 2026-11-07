@@ -85,7 +85,7 @@ class DetectionTests(unittest.TestCase):
         self.assertIn('def review_results(self, result)',app)
         self.assertIn('def reload_presets(self)',app)
         self.assertIn('def render_reviewed(self, result',app)
-        self.assertIn('self.state[\\'success_reference\\']',app)
+        self.assertIn("self.state['success_reference']",app)
         self.assertIn('No YouTube connection or publishing',app)
 
 
