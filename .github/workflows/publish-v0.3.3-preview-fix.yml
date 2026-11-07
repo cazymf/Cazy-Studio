@@ -1,0 +1,89 @@
+name: Publish Cazy Studio v0.3.3 smooth-preview fix
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0.3.3-preview-fix.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get verified v0.3.2 update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cazy"
+          gh release download v0.3.2 --repo "$GITHUB_REPOSITORY" --pattern 'Cazy_Studio_v0_3_2_Update.zip' --dir "$RUNNER_TEMP/cazy"
+          cd "$RUNNER_TEMP/cazy"
+          unzip -q Cazy_Studio_v0_3_2_Update.zip
+
+      - name: Apply asynchronous playback/timeline patch
+        env:
+          PATCH_B64: "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"
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy"
+          python - <<'PY'
+          import base64, io, os, tarfile, zlib
+          data = zlib.decompress(base64.b64decode(os.environ['PATCH_B64']))
+          with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+              for member in archive.getmembers():
+                  assert member.name in {'preview_worker.py', 'app_patch_edit.py'} and member.isfile()
+                  with open(member.name, 'wb') as f:
+                      f.write(archive.extractfile(member).read())
+          PY
+          python app_patch_edit.py
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib
+          expected={
+              'app.py':'597f0b19f590517c826f0fc1eb93942b78521ec1da1eace7ae635fed7c48ba76',
+              'preview_worker.py':'ab8ed02f809eccd669aea29321eb219e6961d91471040ef691f162ddd028ca24'
+          }
+          for name, digest in expected.items():
+              assert hashlib.sha256(Path(name).read_bytes()).hexdigest() == digest, name+' failed validated patch check'
+          p=Path('update_core.py')
+          s=p.read_text()
+          assert "APP_VERSION = '0.3.2'" in s
+          s=s.replace("APP_VERSION = '0.3.2'","APP_VERSION = '0.3.3'",1)
+          needle="'Cazy Studio.exe', 'app.py', 'engine.py'"
+          assert needle in s
+          s=s.replace(needle,"'Cazy Studio.exe', 'app.py', 'preview_worker.py', 'engine.py'",1)
+          p.write_text(s)
+          Path('version.py').write_text("APP_VERSION = '0.3.3'\n")
+          assert hashlib.sha256(p.read_bytes()).hexdigest() == '89bae1af854b3fa525babf39941a5d27c7900fa30c09704a75db689f09d48dbe'
+          PY
+
+      - name: Package validated v0.3.3 update
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy"
+          python - <<'PY'
+          import json,zipfile,hashlib
+          from pathlib import Path
+          files=['app.py','preview_worker.py','update_core.py','version.py']
+          manifest={'product':'CazyStudio','format':1,'version':'0.3.3',
+                    'files':{name:hashlib.sha256(Path(name).read_bytes()).hexdigest() for name in files}}
+          with zipfile.ZipFile('Cazy_Studio_v0_3_3_Update.zip','w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              z.writestr('update_manifest.json',json.dumps(manifest,indent=2))
+              for name in files:z.write(name,name)
+          import update_core
+          assert update_core.inspect_update_zip('Cazy_Studio_v0_3_3_Update.zip','0.3.3')
+          PY
+
+      - name: Publish verified update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy"
+          if gh release view v0.3.3 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.3 Cazy_Studio_v0_3_3_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.3 Cazy_Studio_v0_3_3_Update.zip --repo "$GITHUB_REPOSITORY" --title 'Cazy Studio v0.3.3 - Smooth Editing' --notes 'Moves preview decoding, resizing and conversion off the Tk editing thread. Coalesces stale seek requests, debounces resize, and removes expensive timeline redraws while scrubbing. Keeps v0.3.2 rendering improvements.'
+          fi
+          gh release edit v0.3.3 --repo "$GITHUB_REPOSITORY" --latest
