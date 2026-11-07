@@ -1,0 +1,81 @@
+name: Publish Cazy Studio v0.3.7 Selected Video Library
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0.3.7-video-library.yml'
+      - 'source/app.py'
+      - 'source/version.py'
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax and library regression tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Exercise AutoDirector user interface
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Construct and verify safe update package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cazy037" "$RUNNER_TEMP/cazy036" "$RUNNER_TEMP/stage"
+          gh release download v0.3.6 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_6_Update.zip' --dir "$RUNNER_TEMP/cazy036"
+          cp source/app.py source/update_core.py source/version.py "$RUNNER_TEMP/stage/"
+          PYTHONPATH=source python - <<'PY'
+          import os,zipfile,tempfile,hashlib
+          from pathlib import Path
+          from update_core import build_update_zip,inspect_update_zip,apply_update_zip,rollback_latest
+          temp=Path(os.environ['RUNNER_TEMP'])
+          oldzip=temp/'cazy036'/'Cazy_Studio_v0_3_6_Update.zip'
+          output=temp/'cazy037'/'Cazy_Studio_v0_3_7_Update.zip'
+          prev=inspect_update_zip(oldzip,'0.3.6')
+          current=build_update_zip(temp/'stage',output,'0.3.7')
+          assert set(current['files'])=={'app.py','update_core.py','version.py'}
+          with tempfile.TemporaryDirectory() as d:
+              root=Path(d)
+              with zipfile.ZipFile(oldzip) as z:
+                  for name in prev['files']:
+                      (root/name).write_bytes(z.read(name))
+              apply_update_zip(output,root,'0.3.7')
+              assert (root/'app.py').read_bytes()==Path('source/app.py').read_bytes()
+              assert "0.3.7" in (root/'version.py').read_text()
+              rollback_latest(root)
+              with zipfile.ZipFile(oldzip) as z:
+                  assert (root/'app.py').read_bytes()==z.read('app.py')
+          print('Verified installer and rollback; archive size',output.stat().st_size)
+          PY
+      - name: Publish verified update to GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy037"
+          if gh release view v0.3.7 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.7 Cazy_Studio_v0_3_7_Update.zip \
+              --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.7 Cazy_Studio_v0_3_7_Update.zip \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.3.7 — Selected Videos Library' \
+              --notes 'AutoDirector now focuses on a simple explicit recording library: add only selected videos, see and reorder the queue, double-click to preview, remove or clear entries without deleting originals, detect missing source files, and persist the list between sessions. Music selection and preparation remain available. YouTube controls have been removed from AutoDirector for this stage. Automatic fight detection, cuts, rendering, thumbnails and titles are future work. Includes installer and rollback verification.'
+          fi
+          gh release edit v0.3.7 --repo "$GITHUB_REPOSITORY" --latest
+      - name: Keep a release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_7_Update
+          path: ${{ runner.temp }}/cazy037/Cazy_Studio_v0_3_7_Update.zip
