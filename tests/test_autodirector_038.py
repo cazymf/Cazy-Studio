@@ -15,6 +15,7 @@ sys.path.insert(0,str(BASE/'source'))
 # synthetic video tests to keep the release pipeline small and deterministic.
 engine = types.ModuleType('engine')
 engine.MediaInfo = type('MediaInfo',(object,),{})
+engine.probe = lambda path: types.SimpleNamespace(duration=0, has_audio=False)
 sys.modules.setdefault('engine',engine)
 spec=importlib.util.spec_from_file_location('cazy_quality_038',BASE/'source'/'quality_engine.py')
 quality=importlib.util.module_from_spec(spec)
