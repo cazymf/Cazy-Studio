@@ -1308,7 +1308,10 @@ class AutoDirectorView(tk.Frame):
         self._label(options, 'ABYSS TEXT DETECTION', 11, ACCENT2, True).pack(anchor='w', padx=15, pady=(0, 5))
         self._label(options, 'Reads game text locally; screenshots are no longer needed.',
                     9, MUTED).pack(anchor='w', padx=15, pady=(0, 5))
-        self._button(options, 'Locate Tesseract OCR', self.choose_ocr_engine).pack(anchor='w', padx=15)
+        controls=tk.Frame(options,bg=CARD)
+        controls.pack(fill='x',padx=15)
+        self._button(controls, 'Locate Tesseract OCR', self.choose_ocr_engine).pack(side='left')
+        self._button(controls, 'Install Help', self.ocr_install_help).pack(side='left',padx=6)
         self.ocr_hint = self._label(options, 'Checking local text recognition...', 9, MUTED)
         self.ocr_hint.pack(anchor='w', padx=15, pady=(4, 8))
 
@@ -1820,6 +1823,16 @@ class AutoDirectorView(tk.Frame):
         self._button(buttons,'Remove Selected',remove).pack(side='left')
         self._button(buttons,'SAVE ALL REFERENCES',commit,True).pack(side='right')
         refresh()
+
+    def ocr_install_help(self):
+        import webbrowser
+        messagebox.showinfo('Set up local text detection',
+            'AutoDirector reads Genshin text with the free local Tesseract OCR engine.\n\n'
+            '1. Install Tesseract for Windows with English language support.\n'
+            '2. Return here and click Locate Tesseract OCR.\n'
+            '3. Select tesseract.exe (often inside Program Files\\Tesseract-OCR).\n\n'
+            'The game footage stays on your computer.',parent=self)
+        webbrowser.open('https://github.com/UB-Mannheim/tesseract/wiki')
 
     def choose_ocr_engine(self):
         """Select locally installed tesseract.exe; no screenshots or cloud API."""
