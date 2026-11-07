@@ -1,0 +1,44 @@
+name: Publish final Cazy Studio v0.3.2 render fix
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish-v0.3.2-final.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Decode and validate final update package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          base64 --decode update-packages/Cazy_Studio_v0_3_2_Update_FINAL.base64 > dist/Cazy_Studio_v0_3_2_Update.zip
+          echo 'cdebb7a9c539b9bfb8fe60a6dbfa12ff6f0a82b250cb5594fc57522f6ad51827  dist/Cazy_Studio_v0_3_2_Update.zip' | sha256sum --check
+          python - <<'PY'
+          import zipfile,json,hashlib
+          p='dist/Cazy_Studio_v0_3_2_Update.zip'
+          with zipfile.ZipFile(p) as z:
+              m=json.loads(z.read('update_manifest.json'))
+              assert m['product']=='CazyStudio' and m['format']==1 and m['version']=='0.3.2',m
+              names=set(z.namelist())
+              assert names==set(m['files'])|{'update_manifest.json'},names
+              assert set(m['files'])=={'quality_engine.py','quality_ui.py','app.py','update_core.py','version.py'}
+              for name,digest in m['files'].items():
+                  assert hashlib.sha256(z.read(name)).hexdigest()==digest,name
+              assert z.testzip() is None
+          PY
+
+      - name: Replace update asset in GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release upload v0.3.2 dist/Cazy_Studio_v0_3_2_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          gh release edit v0.3.2 --repo "$GITHUB_REPOSITORY" --latest --notes 'Optimized AI render: crop+resize before 2x Real-ESRGAN, Fast 30/Balanced 60/Every Frame selection, true frame progress, hidden console windows, automatic scratch cleanup, and optical flow no longer needlessly interpolates capped AI frames when the source already meets the output FPS. Lower AI processing FPS trades unique motion frames for render speed.'
