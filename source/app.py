@@ -43,7 +43,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.7  |  AutoDirector Video Library')
+        self.title('Cazy Studio v0.3.8  |  AutoDirector Detection Beta')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
@@ -1010,7 +1010,7 @@ def _autodirector_defaults():
     return {
         'schema': 1, 'queue': [], 'music_folder': '', 'random_music': True,
         'avoid_repeats': True, 'mode': _AUTODIRECTOR_MODES[0],
-        'visibility': 'Private', 'render_preset': '', 'recent_music': '',
+        'visibility': 'Private', 'render_preset': '', 'recent_music': '', 'success_reference': '',
     }
 
 
@@ -1028,6 +1028,8 @@ def _autodirector_validate(state):
         raise ValueError('Invalid music folder')
     if not isinstance(state.get('render_preset'), str) or len(state['render_preset']) > 100:
         raise ValueError('Invalid render preset')
+    if not isinstance(state.get('success_reference', ''), str) or len(state.get('success_reference', '')) > 4096:
+        raise ValueError('Invalid completion screenshot path')
     if not isinstance(state.get('recent_music'), str) or len(state['recent_music']) > 4096:
         raise ValueError('Invalid previously selected song')
     if not isinstance(state.get('random_music'), bool) or not isinstance(state.get('avoid_repeats'), bool):
@@ -1131,10 +1133,15 @@ class AutoDirectorView(tk.Frame):
         self.random_var = tk.BooleanVar(value=self.state['random_music'])
         self.avoid_var = tk.BooleanVar(value=self.state['avoid_repeats'])
         self.preset_var = tk.StringVar(value=self.state.get('render_preset', ''))
+        self._auto_busy = False
+        self._auto_messages = queue.Queue()
+        self._auto_cancel = threading.Event()
+        self._review_window = None
         self.status_var = tk.StringVar(value='Ready. Choose the exact recordings you want AutoDirector to use.')
         self.detail_var = tk.StringVar(value='Select a recording to see its location and preview it.')
         self._make_view()
         self.refresh()
+        self.after(120, self._poll_auto_messages)
 
     def _label(self, parent, text, size=10, color=TEXT, bold=False):
         return tk.Label(parent, text=text, bg=parent.cget('bg'), fg=color, anchor='w',
@@ -1159,13 +1166,13 @@ class AutoDirectorView(tk.Frame):
         top = tk.Frame(self, bg=BG)
         top.pack(fill='x', padx=18, pady=(15, 8))
         self._label(top, 'CAZY AUTODIRECTOR', 19, ACCENT, True).pack(side='left')
-        self._label(top, 'Select videos  →  Plan edits  →  Review results', 10, MUTED).pack(side='left', padx=18)
+        self._label(top, 'Select videos  →  Scan gameplay  →  Review cuts', 10, MUTED).pack(side='left', padx=18)
         self._button(top, 'Save Library', self.save).pack(side='right')
 
         note = tk.Frame(self, bg='#172337', highlightbackground=BORDER, highlightthickness=1)
         note.pack(fill='x', padx=18, pady=(0, 10))
         tk.Label(note, bg='#172337', fg=ACCENT2, anchor='w',
-                 text='LOCAL WORKSPACE  •  ONLY videos YOU add are included. Nothing is scanned automatically. '
+                 text='LOCAL WORKSPACE  •  ONLY videos YOU add are included. Only selected videos are scanned. '
                       'Your original recordings stay untouched. No YouTube connection or publishing.',
                  font=('Segoe UI', 9, 'bold'), wraplength=1250, justify='left').pack(fill='x', padx=12, pady=9)
 
@@ -1228,9 +1235,10 @@ class AutoDirectorView(tk.Frame):
 
         bottom = tk.Frame(library, bg=CARD)
         bottom.pack(fill='x', padx=14, pady=(0, 14))
-        self._label(bottom, 'Next: prepare local music assignments',
+        self._label(bottom, 'Local beta detector  •  review each result',
                     9, MUTED).pack(side='left', pady=8)
-        self._button(bottom, 'PREPARE SELECTED VIDEOS', self.prepare, True).pack(side='right')
+        self._button(bottom, 'SCAN SELECTED VIDEO', self.scan_selected, True).pack(side='right')
+        self._button(bottom, 'Assign Music', self.prepare).pack(side='right', padx=(0, 7))
 
         self._label(options, '2  EDITING PLAN', 13, ACCENT2, True).pack(
             anchor='w', padx=15, pady=(16, 5))
@@ -1238,7 +1246,7 @@ class AutoDirectorView(tk.Frame):
             anchor='w', padx=15, pady=(0, 4))
         self._combo(options, self.mode_var, _AUTODIRECTOR_MODES).pack(
             fill='x', padx=15, pady=(0, 7))
-        self._label(options, 'Fight recognition and auto-cuts are in development.',
+        self._label(options, 'Fight detection is experimental — cuts require review.',
                     9, YELLOW).pack(anchor='w', padx=15, pady=(0, 12))
 
         self._label(options, 'MUSIC', 11, ACCENT2, True).pack(
@@ -1263,24 +1271,30 @@ class AutoDirectorView(tk.Frame):
             anchor='w', padx=15)
         self.preset_combo = self._combo(options, self.preset_var,
                                        ('Use last-used settings',))
-        self.preset_combo.pack(fill='x', padx=15, pady=(4, 12))
+        self.preset_combo.pack(fill='x', padx=15, pady=(4, 4))
+        self._button(options, 'Reload Saved Presets', self.reload_presets).pack(anchor='w', padx=15, pady=(0, 4))
+        self.preset_hint = self._label(options, 'Loading named presets...', 9, MUTED)
+        self.preset_hint.pack(anchor='w', padx=15, pady=(0, 9))
+        self._label(options, 'DETECTION EXAMPLE (OPTIONAL)', 11, ACCENT2, True).pack(anchor='w', padx=15, pady=(0, 5))
+        self._button(options, 'Choose Success Screenshot', self.choose_success_reference).pack(anchor='w', padx=15)
+        self.reference_hint = self._label(options, 'No example screenshot', 9, MUTED)
+        self.reference_hint.pack(anchor='w', padx=15, pady=(4, 8))
 
         review = tk.Frame(options, bg=CARD2)
         review.pack(fill='x', padx=14, pady=(1, 12))
-        tk.Label(review, text='3  OUTPUT REVIEW  ·  COMING LATER', bg=CARD2,
+        tk.Label(review, text='3  REVIEW CUT + EXPORT LOCALLY', bg=CARD2,
                  fg=ACCENT2, anchor='w', font=('Segoe UI', 10, 'bold')).pack(
                      fill='x', padx=10, pady=(10, 5))
         tk.Label(review, text='Final video  •  Thumbnail  •  Title',
                  bg=CARD2, fg=TEXT, anchor='w',
                  font=('Segoe UI', 9)).pack(fill='x', padx=10, pady=(0, 5))
-        tk.Label(review, text='YouTube publishing will be added only after the editor works reliably.',
+        tk.Label(review, text='Edit start/end timestamps first. YouTube is disabled.',
                  bg=CARD2, fg=MUTED, anchor='w', justify='left', wraplength=290,
                  font=('Segoe UI', 9)).pack(fill='x', padx=10, pady=(0, 10))
 
         footer = tk.Frame(self, bg=BG)
         footer.pack(fill='x', padx=18, pady=(0, 12))
-        self._label(footer, 'CURRENT STAGE: video library + queue preparation. '
-                          'No automatic cutting, rendering or uploading yet.',
+        self._label(footer, 'BETA: detect result screens, edit times, render video + thumbnail + title locally. No uploads.',
                     9, ACCENT2, True).pack(anchor='w')
         tk.Label(footer, textvariable=self.status_var, bg=BG, fg=MUTED,
                  anchor='w', font=('Segoe UI', 9), wraplength=1150,
@@ -1329,6 +1343,9 @@ class AutoDirectorView(tk.Frame):
         self.preset_combo.configure(values=names)
         if self.preset_var.get() not in names:
             self.preset_var.set(names[0])
+        self.preset_hint.configure(text=f'{len(names)-1} saved Quality Lab presets')
+        example = self.state.get('success_reference', '')
+        self.reference_hint.configure(text=Path(example).name if example else 'No example screenshot')
         self._update_details()
 
     def _selected(self):
@@ -1478,7 +1495,7 @@ class AutoDirectorView(tk.Frame):
         self.refresh()
         self.status_var.set(
             f'{count} selected video(s) prepared with local music assignments. '
-            'Automatic cutting, rendering, thumbnails and titles are next development stages.')
+            'Choose a selected video and click SCAN SELECTED VIDEO to test detection.')
 
 
 if __name__=='__main__':
