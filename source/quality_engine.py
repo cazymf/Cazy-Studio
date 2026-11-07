@@ -642,6 +642,40 @@ def decode_settings(data: dict) -> QualitySettings:
     return opts
 
 
+
+def resolve_saved_render_preset(name: str) -> QualitySettings:
+    """Resolve the SAME named Quality Lab recipe shown by AutoDirector.
+
+    A missing name is an explicit error: never silently render with defaults.
+    """
+    if not name or name == 'Use last-used settings':
+        prefs = load_preferences()
+        if prefs.get('last_used'):
+            return decode_settings(prefs['last_used'])
+        return QualitySettings()
+    prefs = load_preferences()
+    if name not in prefs['presets']:
+        raise ValueError('Saved Quality Lab render preset not found: ' + name)
+    return decode_settings(prefs['presets'][name])
+
+
+def describe_saved_render_preset(name: str) -> str:
+    """Human-readable active recipe, with exact saved options."""
+    opts = resolve_saved_render_preset(name)
+    return (
+        f'Quality profile: {opts.preset}\n'
+        f'Resolution: {opts.resolution}  |  FPS: '
+        f'{opts.fps if opts.fps else "Source"}\n'
+        f'Upscaling: {opts.upscale}\n'
+        f'Frame generation: {opts.frame_method}\n'
+        f'AI speed: {opts.ai_speed}\n'
+        f'Encoder: {opts.encoder}  |  Quality: {opts.quality}\n'
+        f'Fit: {opts.fit}  |  Sharpen: {opts.sharpen}  |  '
+        f'Denoise: {opts.denoise}\n'
+        f'Blur: {opts.motion_blur}  |  Contrast: {opts.contrast}%  |  '
+        f'Saturation: {opts.saturation}%'
+    )
+
 def validate_name(name: str) -> str:
     if not isinstance(name, str):
         raise ValueError('Preset name must be text')
@@ -890,7 +924,7 @@ def cazy_render_local_package(video_path, begin, finish, destination, preset_nam
     if preset_name and preset_name != 'Use last-used settings':
         if preset_name not in settings['presets']:
             raise ValueError('Saved render preset not found: ' + preset_name)
-        opts = decode_settings(settings['presets'][preset_name])
+        opts = resolve_saved_render_preset(preset_name)
     elif settings.get('last_used'):
         opts = decode_settings(settings['last_used'])
     else:
@@ -1379,7 +1413,7 @@ def render_full_run(segments,destination,preset_name,music="",progress=None,
     if preset_name and preset_name!="Use last-used settings":
         if preset_name not in prefs["presets"]:
             raise ValueError("Saved Quality Lab preset not found: "+preset_name)
-        base=quality.decode_settings(prefs["presets"][preset_name])
+        base=quality.resolve_saved_render_preset(preset_name)
     elif prefs.get("last_used"):
         base=quality.decode_settings(prefs["last_used"])
     else:
