@@ -1,0 +1,63 @@
+name: Validate Cazy Studio v0.3.9 Live Rendering FPS
+on:
+  push:
+    branches: [feature/render-live-fps-039]
+    paths:
+      - 'source/**'
+      - 'tests/**'
+      - '.github/workflows/test-render-fps-039.yml'
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb
+      - name: Run rendering, AutoDirector and UI tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Verify v0.3.9 updater installation and rollback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy039/base /tmp/cazy039/stage /tmp/cazy039/out
+          gh release download v0.3.8 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_8_Update.zip' --dir /tmp/cazy039/base
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy039/stage
+          PYTHONPATH=source python - <<'PY'
+          from pathlib import Path
+          import tempfile,zipfile
+          from update_core import build_update_zip,inspect_update_zip,apply_update_zip,rollback_latest
+          old=Path('/tmp/cazy039/base/Cazy_Studio_v0_3_8_Update.zip')
+          target=Path('/tmp/cazy039/out/Cazy_Studio_v0_3_9_Update.zip')
+          previous=inspect_update_zip(old,'0.3.8')
+          manifest=build_update_zip('/tmp/cazy039/stage',target,'0.3.9')
+          assert set(manifest['files'])=={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          with tempfile.TemporaryDirectory() as location:
+              root=Path(location)
+              with zipfile.ZipFile(old) as archive:
+                  for name in previous['files']:
+                      (root/name).write_bytes(archive.read(name))
+              apply_update_zip(target,root,'0.3.9')
+              assert (root/'version.py').read_text().strip()=="APP_VERSION = '0.3.9'"
+              assert (root/'quality_engine.py').read_bytes()==Path('source/quality_engine.py').read_bytes()
+              rollback_latest(root)
+              with zipfile.ZipFile(old) as archive:
+                  assert (root/'quality_engine.py').read_bytes()==archive.read('quality_engine.py')
+          print('Installer + rollback verified')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_9_PREVIEW
+          path: /tmp/cazy039/out/Cazy_Studio_v0_3_9_Update.zip
+          if-no-files-found: error

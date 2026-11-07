@@ -43,7 +43,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.8  |  AutoDirector Detection Beta')
+        self.title('Cazy Studio v0.3.9  |  Live Render Speed')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)

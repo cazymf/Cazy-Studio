@@ -1,0 +1,75 @@
+name: Publish Cazy Studio v0.3.9 Live Render FPS
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v0.3.9-render-fps.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run all regressions including measured FPS
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Build and validate updater ZIP with rollback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cazy039/base" "$RUNNER_TEMP/cazy039/stage" "$RUNNER_TEMP/cazy039/out"
+          gh release download v0.3.8 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_8_Update.zip' --dir "$RUNNER_TEMP/cazy039/base"
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py "$RUNNER_TEMP/cazy039/stage"
+          PYTHONPATH=source python - <<'PY'
+          from pathlib import Path
+          import tempfile,zipfile,os
+          from update_core import build_update_zip,inspect_update_zip,apply_update_zip,rollback_latest
+          folder=Path(os.environ['RUNNER_TEMP'])/'cazy039'
+          old=folder/'base/Cazy_Studio_v0_3_8_Update.zip'
+          target=folder/'out/Cazy_Studio_v0_3_9_Update.zip'
+          prev=inspect_update_zip(old,'0.3.8')
+          manifest=build_update_zip(folder/'stage',target,'0.3.9')
+          assert set(manifest['files'])=={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          with tempfile.TemporaryDirectory() as t:
+              root=Path(t)
+              with zipfile.ZipFile(old) as z:
+                  for filename in prev['files']:
+                      (root/filename).write_bytes(z.read(filename))
+              apply_update_zip(target,root,'0.3.9')
+              assert (root/'version.py').read_text().strip()=="APP_VERSION = '0.3.9'"
+              assert (root/'quality_engine.py').read_bytes()==Path('source/quality_engine.py').read_bytes()
+              rollback_latest(root)
+              with zipfile.ZipFile(old) as z:
+                  assert (root/'quality_engine.py').read_bytes()==z.read('quality_engine.py')
+          print('Verified updater package:',target.stat().st_size,'bytes')
+          PY
+      - name: Publish verified GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy039/out"
+          if gh release view v0.3.9 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.9 Cazy_Studio_v0_3_9_Update.zip \
+              --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.9 Cazy_Studio_v0_3_9_Update.zip \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.3.9 — Live Render FPS & ETA' \
+              --notes 'Quality Lab and AutoDirector now display measured processing FPS and per-stage ETA while rendering, including Real-ESRGAN, RIFE and FFmpeg extraction/encoding. FPS measures frames actually completed per second, separate from output video FPS. Render counters are sampled locally and smoothed over a moving window. No new APIs or cloud services. Source video remains untouched. Validated with synthetic progress, UI tests and updater rollback.'
+          fi
+          gh release edit v0.3.9 --repo "$GITHUB_REPOSITORY" --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_9_Update
+          path: ${{ runner.temp }}/cazy039/out/Cazy_Studio_v0_3_9_Update.zip

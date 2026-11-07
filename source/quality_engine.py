@@ -229,7 +229,7 @@ def _filter_chain(info: engine.MediaInfo, opts: QualitySettings, *,
 
 def _run(cmd:list[str], on_status=None, cancel=None, cwd=None,
          progress_dir=None, progress_total=0, progress_label='AI processing',
-         on_progress=None, ffmpeg_duration=None):
+         on_progress=None, ffmpeg_duration=None, ffmpeg_fps=None):
     """Run an external stage and report *measured* frame/time progress.
 
     Real-ESRGAN and RIFE report completed PNGs. FFmpeg reports encoded media
@@ -277,7 +277,14 @@ def _run(cmd:list[str], on_status=None, cancel=None, cwd=None,
                                 else:
                                     ts=re.findall(r'(?m)^out_time=(\d+):(\d+):([\d.]+)$',log)
                                     secs=(int(ts[-1][0])*3600+int(ts[-1][1])*60+float(ts[-1][2])) if ts else 0.0
-                                on_progress(min(.999,max(0.0,secs/ffmpeg_duration)),None,None)
+                                frame_values=re.findall(r'(?m)^frame=\s*(\d+)\s*$',log)
+                                if ffmpeg_fps and frame_values:
+                                    total_frames=max(1,int(round(ffmpeg_duration*float(ffmpeg_fps))))
+                                    frames_done=min(total_frames,int(frame_values[-1]))
+                                    on_progress(min(.999,max(0.0,secs/ffmpeg_duration)),
+                                                frames_done,total_frames)
+                                else:
+                                    on_progress(min(.999,max(0.0,secs/ffmpeg_duration)),None,None)
                             except (OSError,ValueError):pass
                         last_progress=now
                     elif progress_dir and on_status and now-last_progress>=1.5:
@@ -289,8 +296,13 @@ def _run(cmd:list[str], on_status=None, cancel=None, cwd=None,
                     errout.seek(0)
                     raise RuntimeError('Processing failed:\n'+errout.read()[-3500:])
                 if on_progress:
-                    on_progress(1.0, int(progress_total) if progress_dir else None,
-                                int(progress_total) if progress_dir else None)
+                    if progress_dir:
+                        final_total=int(progress_total)
+                    elif progress_file and ffmpeg_fps:
+                        final_total=max(1,int(round(ffmpeg_duration*float(ffmpeg_fps))))
+                    else:
+                        final_total=None
+                    on_progress(1.0,final_total,final_total)
             finally:
                 if proc.poll() is None:
                     proc.kill();proc.wait()
@@ -342,7 +354,7 @@ def _run_ai_sequence(path, info, opts, w, h, fps, dur, tmp, root, status, cancel
           '-t',f'{dur:.5f}','-i',path,'-vf',','.join(vf),
           '-start_number','0',str(frames_dir/'%08d.png')],None,cancel,
          on_progress=(lambda f,d,t:stage_progress('extract',f,d,t)) if stage_progress else None,
-         ffmpeg_duration=dur)
+         ffmpeg_duration=dur,ffmpeg_fps=processing_fps)
     count=sum(1 for _ in frames_dir.glob('*.png'))
     if count<2:raise RuntimeError('Not enough frames extracted for the AI workflow')
     active=frames_dir
@@ -386,6 +398,45 @@ def _run_ai_sequence(path, info, opts, w, h, fps, dur, tmp, root, status, cancel
     return str(active/'%08d.png'), produced_fps, start_index
 
 
+class RenderSpeedMeter:
+    """Measure frame throughput for each rendering stage independently.
+
+    Frame rate here means *processed frames per wall-clock second*, rather
+    than the configured output video FPS. Uses an eight-second moving window.
+    """
+    def __init__(self, clock=None):
+        from collections import deque
+        import time
+        self.clock=clock or time.monotonic
+        self.samples={}
+        self._deque=deque
+
+    def describe(self, stage, done, total):
+        if done is None or total is None or total <= 0:
+            return ''
+        import math
+        now=self.clock()
+        done=max(0,min(int(done),int(total)))
+        samples=self.samples.setdefault(stage,self._deque(maxlen=40))
+        if samples and done < samples[-1][1]:
+            samples.clear()
+        samples.append((now,done))
+        while len(samples)>1 and now-samples[0][0]>8.0:
+            samples.popleft()
+        if len(samples)<2:
+            return ''
+        seconds=now-samples[0][0]
+        frames=done-samples[0][1]
+        if seconds<0.8 or frames<=0:
+            return ''
+        rate=frames/seconds
+        if not math.isfinite(rate) or rate<=0:
+            return ''
+        remaining=max(0,total-done)/rate
+        eta=f'{int(remaining//60)}m {int(remaining%60):02d}s' if remaining>=60 else f'{int(remaining+0.5)}s'
+        return f'  •  {rate:.1f} FPS  •  ETA {eta}'
+
+
 def render_quality(path: str, output: str, opts: QualitySettings, status: Callable[[str],None]|None=None,
                    cancel=None, sample=False, root: str|None=None,
                    progress: Callable[[float,str,int|None,int|None],None]|None=None) -> str:
@@ -418,12 +469,13 @@ def render_quality(path: str, output: str, opts: QualitySettings, status: Callab
                   'upscale':'Real-ESRGAN upscaling',
                   'encode':'Encoding final MP4'}
     last_pct=[0.0]
+    speed_meter=RenderSpeedMeter()
     def report(stage,fraction,done=None,total=None):
         low,high=stages.get(stage,(0,99.5))
         pct=min(99.5,max(last_pct[0],low+(high-low)*max(0.0,min(1.0,float(fraction)))))
         last_pct[0]=pct
         if progress:
-            progress(pct,stage_labels.get(stage,stage),done,total)
+            progress(pct,stage_labels.get(stage,stage)+speed_meter.describe(stage,done,total),done,total)
     if progress:report(next(iter(stages)),0)
     with tempfile.TemporaryDirectory(prefix='cazy_quality_', dir=opts.scratch_dir or None) as td:
         ai_seq=_run_ai_sequence(path,info,opts,w,h,fps,dur,td,root,status,cancel,report)
@@ -460,7 +512,7 @@ def render_quality(path: str, output: str, opts: QualitySettings, status: Callab
             try:
                 _run(cmd,None,cancel,
                      on_progress=lambda f,d,t:report('encode',f,d,t),
-                     ffmpeg_duration=dur)
+                     ffmpeg_duration=dur,ffmpeg_fps=fps)
                 if not Path(output).is_file() or Path(output).stat().st_size<1000:
                     raise RuntimeError('Output file was empty')
                 if progress:progress(100.0,'Complete',None,None)
