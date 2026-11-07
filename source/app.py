@@ -44,7 +44,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.13  |  Preset Display and Detection Diagnostics')
+        self.title('Cazy Studio v0.3.14  |  OCR Abyss Full Run')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
@@ -1025,7 +1025,7 @@ def _autodirector_defaults():
         'schema': 1, 'queue': [], 'music_folder': '', 'random_music': True,
         'avoid_repeats': True, 'mode': _AUTODIRECTOR_MODES[0],
         'visibility': 'Private', 'render_preset': '', 'recent_music': '', 'success_reference': '',
-        'references': {},
+        'references': {}, 'ocr_path': '',
     }
 
 
@@ -1045,6 +1045,8 @@ def _autodirector_validate(state):
         raise ValueError('Invalid render preset')
     if not isinstance(state.get('success_reference', ''), str) or len(state.get('success_reference', '')) > 4096:
         raise ValueError('Invalid completion screenshot path')
+    if not isinstance(state.get('ocr_path',''),str) or len(state.get('ocr_path',''))>4096:
+        raise ValueError('Invalid OCR executable path')
     autodirector_fullrun.normalize_references(state.get('references',{}),
                                                  state.get('success_reference',''))
     if not isinstance(state.get('recent_music'), str) or len(state['recent_music']) > 4096:
@@ -1150,6 +1152,7 @@ class AutoDirectorView(tk.Frame):
         self.random_var = tk.BooleanVar(value=self.state['random_music'])
         self.avoid_var = tk.BooleanVar(value=self.state['avoid_repeats'])
         self.preset_var = tk.StringVar(value=self.state.get('render_preset', ''))
+        self.ocr_var = tk.StringVar(value=self.state.get('ocr_path',''))
         self._full_run_result = None
         self._auto_busy = False
         self._auto_messages = queue.Queue()
@@ -1253,7 +1256,7 @@ class AutoDirectorView(tk.Frame):
 
         bottom = tk.Frame(library, bg=CARD)
         bottom.pack(fill='x', padx=14, pady=(0, 14))
-        self._label(bottom, 'Full Run = every half joined into one video',
+        self._label(bottom, 'OCR triggers + 2-second pre-roll for each half',
                     9, MUTED).pack(side='left', pady=8)
         self._button(bottom, 'SCAN / REVIEW RUN', self.scan_selected, True).pack(side='right')
         self._button(bottom, 'Assign Music', self.prepare).pack(side='right', padx=(0, 7))
@@ -1266,7 +1269,7 @@ class AutoDirectorView(tk.Frame):
         self._combo(options, self.mode_var, _AUTODIRECTOR_MODES).pack(
             fill='x', padx=15, pady=(0, 7))
         self._label(options, 'Full Run joins ALL successful halves into ONE MP4.', 9, ACCENT2).pack(anchor='w', padx=15, pady=(0, 7))
-        self._label(options, 'Fight detection is experimental — cuts require review.',
+        self._label(options, 'Text OCR detection — review your cuts before rendering.',
                     9, YELLOW).pack(anchor='w', padx=15, pady=(0, 12))
 
         self._label(options, 'MUSIC', 11, ACCENT2, True).pack(
@@ -1302,10 +1305,12 @@ class AutoDirectorView(tk.Frame):
         tk.Label(options, textvariable=self.recipe_details_var, bg=CARD2, fg=TEXT,
                  font=('Segoe UI', 9), anchor='w', justify='left',
                  wraplength=310, padx=10, pady=8).pack(fill='x', padx=15, pady=(0, 10))
-        self._label(options, 'ABYSS DETECTION REFERENCES', 11, ACCENT2, True).pack(anchor='w', padx=15, pady=(0, 5))
-        self._button(options, 'Manage Multiple Screenshots', self.manage_references).pack(anchor='w', padx=15)
-        self.reference_hint = self._label(options, 'Start / Other Side / Completed', 9, MUTED)
-        self.reference_hint.pack(anchor='w', padx=15, pady=(4, 8))
+        self._label(options, 'ABYSS TEXT DETECTION', 11, ACCENT2, True).pack(anchor='w', padx=15, pady=(0, 5))
+        self._label(options, 'Reads game text locally; screenshots are no longer needed.',
+                    9, MUTED).pack(anchor='w', padx=15, pady=(0, 5))
+        self._button(options, 'Locate Tesseract OCR', self.choose_ocr_engine).pack(anchor='w', padx=15)
+        self.ocr_hint = self._label(options, 'Checking local text recognition...', 9, MUTED)
+        self.ocr_hint.pack(anchor='w', padx=15, pady=(4, 8))
 
         review = tk.Frame(options, bg=CARD2)
         review.pack(fill='x', padx=14, pady=(1, 12))
@@ -1372,11 +1377,10 @@ class AutoDirectorView(tk.Frame):
             self.preset_var.set(names[0])
         self.preset_hint.configure(text=f'{len(names)-1} saved Quality Lab presets')
         self.update_saved_recipe_details()
-        references = autodirector_fullrun.normalize_references(
-            self.state.get('references',{}),self.state.get('success_reference',''))
-        self.reference_hint.configure(text='Saved screenshot examples (not detections): ' +
-            ' / '.join(f'{key} {len(references[key])}'
-                     for key in ('start','switch','complete')))
+        executable=quality_engine._cazy_tesseract(self.ocr_var.get())
+        self.ocr_hint.configure(
+            text='OCR ready: '+Path(executable).name if executable
+            else 'OCR not installed: locate tesseract.exe')
         self._update_details()
 
     def _selected(self):
@@ -1404,6 +1408,7 @@ class AutoDirectorView(tk.Frame):
         self.state['avoid_repeats'] = self.avoid_var.get()
         self.state['mode'] = self.mode_var.get()
         self.state['render_preset'] = self.preset_var.get()
+        self.state['ocr_path'] = self.ocr_var.get()
         # Legacy visibility setting remains in existing saved queues for
         # compatibility, but there is no publishing UI or publishing action.
         try:
@@ -1574,6 +1579,10 @@ class AutoDirectorView(tk.Frame):
         if self.mode_var.get() == 'Full Run':
             self.scan_entire_full_run()
             return
+        messagebox.showinfo('Text detection', 'Text-only Abyss scanning is available in Full Run mode.\n'
+                            'Select Full Run to detect both sides and join them into one video.',
+                            parent=self)
+        return
         selected = self._selected()
         if selected < 0:
             messagebox.showinfo('Select a video', 'Select one of your videos first.', parent=self)
@@ -1842,6 +1851,21 @@ class AutoDirectorView(tk.Frame):
         self._button(buttons,'SAVE ALL REFERENCES',commit,True).pack(side='right')
         refresh()
 
+    def choose_ocr_engine(self):
+        """Select locally installed tesseract.exe; no screenshots or cloud API."""
+        path=filedialog.askopenfilename(
+            parent=self,title='Select local Tesseract OCR executable',
+            filetypes=[('Tesseract OCR','tesseract.exe'),('Programs','*.exe'),('All files','*.*')])
+        if not path:
+            return
+        if not Path(path).is_file():
+            messagebox.showerror('OCR setup','OCR executable was not found.',parent=self)
+            return
+        self.ocr_var.set(str(Path(path).resolve()))
+        self.save()
+        self.refresh()
+        self.status_var.set('Local text recognition selected: '+self.ocr_var.get())
+
     def scan_entire_full_run(self):
         if self._auto_busy:
             messagebox.showinfo('AutoDirector busy','Another scan/render is running.',parent=self)
@@ -1858,18 +1882,15 @@ class AutoDirectorView(tk.Frame):
             return
         if not self.save():
             return
-        refs=autodirector_fullrun.normalize_references(
-            self.state.get('references',{}),self.state.get('success_reference',''))
-        missing=[kind for kind in ('start','switch','complete') if not refs[kind]]
-        if missing and not quality_engine._cazy_tesseract():
-            readable=', '.join(autodirector_fullrun.REFERENCE_KINDS[k] for k in missing)
-            self.status_var.set('Add missing Abyss detection screenshots: '+readable)
-            if messagebox.askyesno('Missing detection screenshots',
-                'Full Run needs examples of all three chamber transitions '
-                'unless Tesseract OCR is installed.\n\n'
-                'Missing: '+readable+'\n\n'
-                'Open screenshot library to add examples now?',parent=self):
-                self.manage_references()
+        executable=quality_engine._cazy_tesseract(self.ocr_var.get())
+        if not executable:
+            self.status_var.set('Local text detection requires Tesseract OCR.')
+            if messagebox.askyesno('Set up text detection',
+                'AutoDirector now reads Start Challenge / On the other side / '
+                'Challenge Completed with local OCR.\n\n'
+                'It needs Tesseract OCR installed on your PC.\n'
+                'Would you like to locate tesseract.exe?',parent=self):
+                self.choose_ocr_engine()
             return
         self._auto_busy=True
         self._auto_cancel.clear()
@@ -1877,7 +1898,7 @@ class AutoDirectorView(tk.Frame):
         def work():
             try:
                 result=autodirector_fullrun.scan_full_run(
-                    paths,refs,cancel=self._auto_cancel,
+                    paths,{},ocr_path=executable,cancel=self._auto_cancel,
                     progress=lambda n:self._auto_messages.put(('progress',n)))
                 self._auto_messages.put(('fullrun_done',result))
             except Exception as exc:
@@ -1939,8 +1960,8 @@ class AutoDirectorView(tk.Frame):
                     event.get('kind','').upper(),event.get('evidence','')))
         bottom=tk.Frame(body,bg=BG)
         bottom.pack(fill='x')
-        self._button(bottom,'Manage Screenshot Examples',
-                     lambda:(win.destroy(),self.manage_references())).pack(side='left')
+        self._button(bottom,'Locate OCR Program',
+                     lambda:(win.destroy(),self.choose_ocr_engine())).pack(side='left')
         self._button(bottom,'Scan Again',
                      lambda:(win.destroy(),self.scan_entire_full_run())).pack(side='left',padx=7)
         self._button(bottom,'Close',win.destroy).pack(side='right')
