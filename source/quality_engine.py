@@ -598,3 +598,309 @@ def save_preferences(prefs: dict, path=None):
     finally:
         if os.path.exists(tmp_name):
             os.unlink(tmp_name)
+
+
+# ---- Cazy AutoDirector local Genshin screen detection (v0.3.8 beta) ----
+# All dependencies are local. OCR uses optional Tesseract when installed.
+# Visual-only candidates are marked POSSIBLE, never falsely confirmed.
+def _cazy_classify_text(text):
+    """Recognize English Genshin challenge text after OCR normalization."""
+    import re as _re
+    normalized = _re.sub(r'[^a-z0-9 ]+', ' ', str(text).lower())
+    normalized = ' '.join(normalized.split())
+    if any(term in normalized for term in (
+        'challenge completed', 'challenge complete', 'battle complete',
+        'battle completed', 'challenge ended', 'victory')):
+        return 'success'
+    if any(term in normalized for term in (
+        'challenge failed', 'challenge failure', 'battle failed',
+        'defeat', 'challenge interrupted')):
+        return 'failure'
+    if any(term in normalized for term in (
+        'challenge started', 'challenge start', 'battle begins',
+        'battle started')):
+        return 'start'
+    return None
+
+
+def _cazy_tesseract():
+    """Find optional local OCR executable without an API or network call."""
+    import shutil
+    program = shutil.which('tesseract')
+    if program:
+        return program
+    if os.name == 'nt':
+        for key in ('ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA'):
+            base = os.environ.get(key)
+            if base:
+                candidate = Path(base) / 'Tesseract-OCR' / 'tesseract.exe'
+                if candidate.is_file():
+                    return str(candidate)
+    return None
+
+
+def _cazy_visual_score(frame, cv2, reference=None):
+    """Quick visual probability of an end/result overlay, not a success verdict."""
+    import numpy as np
+    img = cv2.resize(frame, (800, 450), interpolation=cv2.INTER_AREA)
+    # Center-upper area contains most Genshin completion and result titles.
+    roi = img[55:220, 110:690]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    gold = cv2.inRange(hsv, np.array([12, 65, 145]), np.array([44, 255, 255]))
+    frac = float(cv2.countNonZero(gold)) / gold.size
+    gray_dark = float(np.mean(gray < 52))
+    # Textlike gold/white titles against a results overlay.
+    edges = cv2.Canny(gray, 65, 135)
+    texture = float(cv2.countNonZero(edges)) / edges.size
+    gold_hint = (0.003 < frac < 0.12 and texture > 0.035)
+    dark_hint = (gray_dark > 0.60 and 0.035 < texture < 0.25)
+    score = max(0.66 if gold_hint else 0.0, 0.57 if dark_hint else 0.0)
+    if reference is not None:
+        # Lower half and HUD remain dynamic. Compare central title only.
+        signature = cv2.resize(gray, (160, 46), interpolation=cv2.INTER_AREA)
+        ref = cv2.resize(reference, (160, 46), interpolation=cv2.INTER_AREA)
+        ref = cv2.GaussianBlur(ref, (3, 3), 0)
+        signature = cv2.GaussianBlur(signature, (3, 3), 0)
+        ncc = float(cv2.matchTemplate(signature, ref, cv2.TM_CCOEFF_NORMED)[0, 0])
+        if ncc > 0.75:
+            score = max(score, min(0.94, ncc))
+    return score
+
+
+def cazy_detect_genshin(video_path, reference_path='', progress=None, cancel=None,
+                        sample_seconds=1.5):
+    """Scan one explicit OBS recording for tentative Genshin completion scenes.
+
+    Returns duration, events and REVIEW-REQUIRED cut suggestions. Strong matches
+    from OCR or an optional example screenshot are higher confidence. No file is
+    changed; start times are suggestions until the user accepts them.
+    """
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError('OpenCV (cv2) is required for local video scanning.') from exc
+    from math import isfinite
+    path = Path(video_path)
+    if not path.is_file():
+        raise FileNotFoundError(str(path))
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError('Could not open selected recording: ' + path.name)
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0)
+        frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration = frames / fps if fps > 0 else 0
+        if not isfinite(duration) or duration <= 0:
+            raise RuntimeError('Could not read video duration')
+        sample_seconds = max(0.7, min(5.0, float(sample_seconds)))
+        reference = None
+        if reference_path:
+            example = cv2.imread(str(reference_path))
+            if example is None:
+                raise ValueError('Could not read the selected success screenshot')
+            resized = cv2.resize(example, (800, 450), interpolation=cv2.INTER_AREA)
+            reference = cv2.cvtColor(resized[55:220, 110:690], cv2.COLOR_BGR2GRAY)
+        ocr_program = _cazy_tesseract()
+        events = []
+        t = 0.0
+        last_kind = ''
+        last_time = -100.0
+        while t < duration:
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError('Scan cancelled')
+            cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+            ok, frame = cap.read()
+            if not ok:
+                t += sample_seconds
+                continue
+            score = _cazy_visual_score(frame, cv2, reference)
+            kind = None
+            reason = 'Possible Genshin result screen (visual pattern)'
+            confidence = score
+            if ocr_program and score >= 0.45:
+                x, y = frame.shape[1], frame.shape[0]
+                snippet = frame[int(.10*y):int(.60*y), int(.08*x):int(.92*x)]
+                png_ok, binary = cv2.imencode('.png', snippet)
+                if png_ok:
+                    try:
+                        result = subprocess.run([ocr_program, 'stdin', 'stdout',
+                                                 '--psm', '11', '-l', 'eng'],
+                                                input=binary.tobytes(), capture_output=True,
+                                                timeout=8, check=False)
+                        kind = _cazy_classify_text(result.stdout.decode('utf-8', 'replace'))
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+            if kind is not None:
+                confidence = 0.98
+                reason = 'Recognized game text (' + kind + ')'
+            elif reference is not None and score >= .76:
+                kind = 'success'
+                reason = 'Matched your sample completion screenshot'
+                confidence = min(.94, score)
+            elif score >= .64:
+                kind = 'possible'
+                confidence = .48
+            if kind and (kind != last_kind or t - last_time > 7):
+                events.append({'at': round(t, 2), 'kind': kind,
+                               'confidence': round(confidence, 2), 'reason': reason})
+                last_kind = kind
+                last_time = t
+            if progress:
+                progress(min(1.0, t / duration))
+            t += sample_seconds
+        if progress:
+            progress(1.0)
+        candidates = []
+        for event in events:
+            if event['kind'] not in ('success', 'possible'):
+                continue
+            end = min(duration, event['at'] + 4.0)
+            previous_starts = [e['at'] for e in events
+                               if e['kind'] == 'start' and 0 < event['at']-e['at'] < 700]
+            previous_results = [e['at'] for e in events
+                                if e['kind'] in ('failure', 'success')
+                                and e['at'] < event['at']]
+            begin = max(0.0, event['at'] - 180.0)
+            if previous_starts:
+                begin = max(0.0, previous_starts[-1] - 3)
+            if previous_results:
+                begin = max(begin, previous_results[-1] + 4)
+            if end - begin < 4:
+                begin = max(0.0, end - 15)
+            candidates.append({'start': round(begin, 2), 'end': round(end, 2),
+                               'at': event['at'],
+                               'confidence': event['confidence'],
+                               'reason': event['reason'],
+                               'review_required': True})
+        return {'path': str(path), 'duration': round(duration, 2),
+                'ocr_available': bool(ocr_program), 'events': events,
+                'candidates': candidates}
+    finally:
+        cap.release()
+
+
+def cazy_render_local_package(video_path, begin, finish, destination, preset_name,
+                              music='', progress=None, status=None, cancel=None,
+                              success_at=None):
+    """Render one reviewed cut, thumbnail, and editable title without YouTube.
+
+    Uses Quality Lab saved presets. Preserves the source and stages output in a
+    temporary directory, moving completed assets only after rendering succeeds.
+    """
+    import re
+    import shutil
+    try:
+        import cv2
+    except ImportError as exc:
+        raise RuntimeError('OpenCV is required for thumbnail extraction') from exc
+    from PIL import Image, ImageDraw, ImageFont
+
+    src = Path(video_path)
+    if not src.is_file():
+        raise FileNotFoundError(str(src))
+    info = engine.probe(str(src))
+    start, end = float(begin), float(finish)
+    if not (0 <= start < end <= info.duration + .15):
+        raise ValueError('Cut timestamps must be within the recording')
+    settings = load_preferences()
+    if preset_name and preset_name != 'Use last-used settings':
+        if preset_name not in settings['presets']:
+            raise ValueError('Saved render preset not found: ' + preset_name)
+        opts = decode_settings(settings['presets'][preset_name])
+    elif settings.get('last_used'):
+        opts = decode_settings(settings['last_used'])
+    else:
+        opts = suggested_settings(info, 'Clean')
+    opts.start = start
+    opts.duration = end - start
+    opts.validate()
+
+    out = Path(destination)
+    out.mkdir(parents=True, exist_ok=True)
+    clean_name = re.sub(r'[^A-Za-z0-9_-]+', '_', src.stem)[:62].strip('_') or 'Genshin'
+    label = 'Stygian Onslaught' if 'stygian' in src.name.lower() else (
+        'Spiral Abyss' if 'abyss' in src.name.lower() else 'Genshin Combat')
+    title = f'{label} | {clean_name.replace("_", " ")} | Genshin Impact'
+    index = 1
+    while (out / f'{clean_name}_AutoDirector_{index:02d}.mp4').exists():
+        index += 1
+    stem = f'{clean_name}_AutoDirector_{index:02d}'
+    target = out / (stem + '.mp4')
+    pic = out / (stem + '_thumbnail.png')
+    title_file = out / (stem + '_title.txt')
+    manifest_file = out / (stem + '_review.json')
+    with tempfile.TemporaryDirectory(prefix='cazy_auto_', dir=out) as scratch:
+        scratch = Path(scratch)
+        basic = scratch / 'cut.mp4'
+        render_quality(str(src), str(basic), opts,
+                       status=status, cancel=cancel,
+                       progress=(lambda pct, phase, done, total:
+                                 progress(pct * .85, phase) if progress else None))
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError('Render cancelled')
+        final = basic
+        if music:
+            if not Path(music).is_file():
+                raise FileNotFoundError('Selected music track is unavailable: ' + music)
+            mixed = scratch / 'with_music.mp4'
+            audio_exists = engine.probe(str(basic)).has_audio
+            ffmpeg = engine.get_ffmpeg()
+            cmd = [ffmpeg, '-hide_banner', '-loglevel', 'error', '-y',
+                   '-i', str(basic), '-stream_loop', '-1', '-i', str(music)]
+            if audio_exists:
+                cmd += ['-filter_complex',
+                        '[0:a:0]volume=1.0[g];[1:a:0]volume=0.20[m];'
+                        '[g][m]amix=inputs=2:duration=first:dropout_transition=2[a]',
+                        '-map', '0:v:0', '-map', '[a]']
+            else:
+                cmd += ['-map', '0:v:0', '-map', '1:a:0', '-af', 'volume=0.20']
+            cmd += ['-c:v', 'copy', '-c:a', 'aac', '-b:a', '256k',
+                    '-t', str(end-start), '-movflags', '+faststart', str(mixed)]
+            run = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if run.returncode:
+                raise RuntimeError('Music mix failed: ' + run.stderr[-1200:])
+            final = mixed
+        if not final.exists() or final.stat().st_size < 1024:
+            raise RuntimeError('Renderer did not produce a valid video')
+        frame_t = min(end - .2, max(start, float(success_at) - 3
+                                     if success_at is not None else start + (end-start)*.65))
+        cap = cv2.VideoCapture(str(src))
+        try:
+            cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, frame_t)*1000)
+            success, frame = cap.read()
+        finally:
+            cap.release()
+        if not success:
+            raise RuntimeError('Could not extract a thumbnail frame')
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        art = Image.fromarray(frame).convert('RGB')
+        art.thumbnail((1280, 720))
+        canvas = Image.new('RGB', (1280,720), '#0b101c')
+        canvas.paste(art, ((1280-art.width)//2,(720-art.height)//2))
+        draw = ImageDraw.Draw(canvas)
+        draw.rectangle((0, 612, 1280, 720), fill='#10182a')
+        try:
+            font_path = 'C:/Windows/Fonts/arialbd.ttf' if os.name == 'nt' else '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+            font = ImageFont.truetype(font_path, 46)
+        except OSError:
+            font = ImageFont.load_default()
+        draw.text((34, 632), label, font=font, fill='#f1f5ff')
+        thumbnail_temp = scratch / 'thumbnail.png'
+        canvas.save(thumbnail_temp)
+        (scratch / 'title.txt').write_text(title + '\n', encoding='utf-8')
+        metadata = {'source': str(src), 'start': start, 'end': end,
+                    'preset': preset_name or 'Use last-used settings',
+                    'music': music, 'title': title, 'reviewed': True}
+        (scratch / 'review.json').write_text(json.dumps(metadata, indent=2),
+                                              encoding='utf-8')
+        if progress:
+            progress(90.0, 'Writing local video package')
+        shutil.move(str(final), target)
+        shutil.move(str(thumbnail_temp), pic)
+        shutil.move(str(scratch / 'title.txt'), title_file)
+        shutil.move(str(scratch / 'review.json'), manifest_file)
+    if progress:
+        progress(100.0, 'Complete')
+    return {'video': str(target), 'thumbnail': str(pic),
+            'title': str(title_file), 'review': str(manifest_file)}

@@ -1,0 +1,57 @@
+name: Validate AutoDirector v0.3.8 Detection Beta
+on:
+  push:
+    branches: [feature/autodirector-038-detection]
+    paths: ['source/**','tests/**','.github/workflows/test-autodirector-038.yml']
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install local-video test requirements
+        run: |
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb
+      - name: Test detector and saved Quality Lab presets
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Test updater installation and rollback against v0.3.7
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy-old release-staging output
+          gh release download v0.3.7 --repo "$GITHUB_REPOSITORY" --pattern 'Cazy_Studio_v0_3_7_Update.zip' --dir /tmp/cazy-old
+          cp source/app.py source/quality_engine.py source/update_core.py source/version.py release-staging/
+          PYTHONPATH=source python - <<'PY'
+          import tempfile,zipfile
+          from pathlib import Path
+          from update_core import build_update_zip, inspect_update_zip,apply_update_zip,rollback_latest
+          target=Path('output/Cazy_Studio_v0_3_8_Update.zip')
+          old=Path('/tmp/cazy-old/Cazy_Studio_v0_3_7_Update.zip')
+          old_manifest=inspect_update_zip(old,'0.3.7')
+          new=build_update_zip('release-staging',target,'0.3.8')
+          assert set(new['files'])=={'app.py','quality_engine.py','update_core.py','version.py'}
+          with tempfile.TemporaryDirectory() as folder:
+              root=Path(folder)
+              with zipfile.ZipFile(old) as z:
+                  for name in old_manifest['files']:
+                      (root/name).write_bytes(z.read(name))
+              apply_update_zip(target,root,'0.3.8')
+              assert (root/'version.py').read_text().strip()=="APP_VERSION = '0.3.8'"
+              rollback_latest(root)
+              assert (root/'version.py').read_text().strip()=="APP_VERSION = '0.3.7'"
+          print('Update install and rollback passed')
+          PY
+      - name: Upload test package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_8_PREVIEW
+          path: output/Cazy_Studio_v0_3_8_Update.zip
+          if-no-files-found: error

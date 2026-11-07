@@ -1,0 +1,73 @@
+name: Publish Cazy Studio v0.3.8 AutoDirector Detection Beta
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-v0.3.8-autodetect.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies and run all tests
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Build and verify v0.3.8 updater-compatible package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/cazy-old" "$RUNNER_TEMP/cazy038" "$RUNNER_TEMP/staging"
+          gh release download v0.3.7 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_7_Update.zip' --dir "$RUNNER_TEMP/cazy-old"
+          cp source/app.py source/quality_engine.py source/update_core.py source/version.py "$RUNNER_TEMP/staging/"
+          PYTHONPATH=source python - <<'PY'
+          import os,tempfile,zipfile
+          from pathlib import Path
+          from update_core import build_update_zip,inspect_update_zip,apply_update_zip,rollback_latest
+          temp=Path(os.environ['RUNNER_TEMP'])
+          old=temp/'cazy-old'/'Cazy_Studio_v0_3_7_Update.zip'
+          zipout=temp/'cazy038'/'Cazy_Studio_v0_3_8_Update.zip'
+          previous=inspect_update_zip(old,'0.3.7')
+          current=build_update_zip(temp/'staging',zipout,'0.3.8')
+          assert set(current['files'])=={'app.py','quality_engine.py','update_core.py','version.py'}
+          with tempfile.TemporaryDirectory() as folder:
+              root=Path(folder)
+              with zipfile.ZipFile(old) as z:
+                  for file in previous['files']:
+                      (root/file).write_bytes(z.read(file))
+              apply_update_zip(zipout,root,'0.3.8')
+              assert (root/'app.py').read_bytes()==Path('source/app.py').read_bytes()
+              assert (root/'quality_engine.py').read_bytes()==Path('source/quality_engine.py').read_bytes()
+              rollback_latest(root)
+              with zipfile.ZipFile(old) as z:
+                  assert (root/'app.py').read_bytes()==z.read('app.py')
+          print('Safe package installed and rolled back correctly:',zipout.stat().st_size,'bytes')
+          PY
+      - name: Publish release and make latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/cazy038"
+          if gh release view v0.3.8 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.8 Cazy_Studio_v0_3_8_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.8 Cazy_Studio_v0_3_8_Update.zip \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.3.8 — AutoDirector Detection Beta' \
+              --notes 'Local Genshin gameplay completion-screen detector (beta) with optional screenshot matching and Tesseract OCR if installed; time-stamped review suggestions and manually editable cut boundaries. AutoDirector now has Reload Saved Presets to use actual Quality Lab named recipes during local rendering. Export creates video, thumbnail, editable title and review metadata. Original recordings are preserved. Selected-video-only processing; no YouTube publishing. Validated with synthetic footage, named-preset export integration, Tk smoke test, and updater rollback. Detection accuracy on actual gameplay remains experimental and requires user validation.'
+          fi
+          gh release edit v0.3.8 --repo "$GITHUB_REPOSITORY" --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_8_Update
+          path: ${{ runner.temp }}/cazy038/Cazy_Studio_v0_3_8_Update.zip
