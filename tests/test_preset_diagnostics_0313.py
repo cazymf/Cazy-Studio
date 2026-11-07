@@ -103,6 +103,7 @@ class SavedPresetAndDetectionTests(unittest.TestCase):
             self.assertGreaterEqual(score,.82)
 
     def test_all_event_types_are_reported_from_mock_gameplay(self):
+        """OCR observations, not reference images, determine the chamber cuts."""
         try:
             import cv2
             import numpy as np
@@ -110,40 +111,38 @@ class SavedPresetAndDetectionTests(unittest.TestCase):
             self.skipTest('OpenCV unavailable')
         with tempfile.TemporaryDirectory() as td:
             root=Path(td)
-            templates={}
-            text={
-                'start':('Start Challenge',(540,290)),
-                'switch':('On the other side...', (300,190)),
-                'complete':('Challenge Completed',(310,198))
-            }
-            frames={}
-            for kind,(words,place) in text.items():
-                frame=np.zeros((540,960,3),dtype=np.uint8)
-                frame[:]=(36,25,18)
-                cv2.putText(frame,words,place,
-                            cv2.FONT_HERSHEY_SIMPLEX,.9,(240,240,240),2)
-                example=root/(kind+'.png')
-                cv2.imwrite(str(example),frame)
-                templates[kind]=[str(example)]
-                frames[kind]=frame
-            neutral=np.zeros((540,960,3),dtype=np.uint8)
-            sequence=['start',None,'switch','start',None,'complete',None]
-            video=root/'OBS.avi'
-            writer=cv2.VideoWriter(str(video),cv2.VideoWriter_fourcc(*'MJPG'),
-                                   10,(960,540))
+            recording=root/'OBS.avi'
+            sequence=['start',None,'switch',None,'start',None,
+                      'complete',None]
+            colors={'start':60,'switch':110,'complete':180,None:0}
+            writer=cv2.VideoWriter(str(recording),
+                         cv2.VideoWriter_fourcc(*'MJPG'),10,(960,540))
             self.assertTrue(writer.isOpened())
-            for stage in sequence:
-                for i in range(10):
-                    writer.write(neutral if stage is None else frames[stage])
+            for kind in sequence:
+                frame=np.full((540,960,3),colors[kind],dtype=np.uint8)
+                for _ in range(10):
+                    writer.write(frame)
             writer.release()
-            with mock.patch.object(quality,'_cazy_tesseract',return_value=None):
-                result=quality.scan_abyss_recording(video,templates,sample_seconds=1)
+            def fake_ocr(frame,executable,cancel=None):
+                val=int(frame[0,0,0])
+                if val < 15:
+                    return None,0.,''
+                kind=min(('start','switch','complete'),
+                         key=lambda k:abs(colors[k]-val))
+                return kind,.97,'Recognized game text'
+            with mock.patch.object(quality,'_cazy_tesseract',return_value='fake-local-ocr'), \
+                 mock.patch.object(quality,'read_abyss_frame_text',fake_ocr):
+                result=quality.scan_abyss_recording(
+                    recording,{},sample_seconds=1)
             counts=result['event_counts']
-            self.assertGreaterEqual(counts['start'],2,result)
-            self.assertGreaterEqual(counts['switch'],1,result)
-            self.assertGreaterEqual(counts['complete'],1,result)
+            self.assertEqual(counts['start'],2,result)
+            self.assertEqual(counts['switch'],1,result)
+            self.assertEqual(counts['complete'],1,result)
             self.assertEqual(result['completed_chambers'],1,result)
             self.assertEqual(len(result['segments']),2,result)
+            self.assertEqual(result['segments'][0]['start'],0.0)
+            self.assertEqual(result['segments'][1]['start'],2.0)
+            self.assertEqual(result['detection_method'],'Local text OCR')
 
 
 if __name__=='__main__':
