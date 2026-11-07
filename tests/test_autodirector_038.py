@@ -79,6 +79,62 @@ class DetectionTests(unittest.TestCase):
             self.assertTrue(video.is_file())
             self.assertTrue(image.is_file())
 
+
+    def test_reviewed_render_uses_named_saved_preset_and_creates_files(self):
+        try:
+            import cv2
+            import numpy as np
+        except ImportError:
+            self.skipTest('opencv-python-headless not installed')
+        with tempfile.TemporaryDirectory() as d:
+            previous = os.environ.get('LOCALAPPDATA')
+            os.environ['LOCALAPPDATA'] = d
+            try:
+                src = Path(d) / 'Abyss_Recording.avi'
+                writer = cv2.VideoWriter(str(src),
+                    cv2.VideoWriter_fourcc(*'MJPG'), 10, (480, 270))
+                self.assertTrue(writer.isOpened())
+                for k in range(40):
+                    frame = np.zeros((270, 480, 3), dtype=np.uint8)
+                    cv2.putText(frame, f'Frame {k}', (35, 110),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1,
+                                (90, 150, 230), 2)
+                    writer.write(frame)
+                writer.release()
+                opts = quality.QualitySettings(preset='Clean',
+                                               resolution='Source',fps=0)
+                prefs = quality.empty_preferences()
+                quality.store_named(prefs, 'My Saved Abyss Recipe',opts)
+                quality.save_preferences(prefs)
+                original_render = quality.render_quality
+                original_probe = quality.engine.probe
+                observed = []
+                def fake_render(path,output,setting,**kwargs):
+                    observed.append((setting.resolution,setting.start,setting.duration))
+                    shutil.copyfile(path,output)
+                    return output
+                quality.render_quality = fake_render
+                quality.engine.probe = lambda p: types.SimpleNamespace(
+                    duration=4.0, has_audio=False)
+                try:
+                    output = quality.cazy_render_local_package(
+                        str(src), .5, 3.5, str(Path(d)/'Finished'),
+                        'My Saved Abyss Recipe')
+                finally:
+                    quality.render_quality = original_render
+                    quality.engine.probe = original_probe
+                self.assertEqual(observed,[('Source',.5,3.0)])
+                self.assertTrue(Path(output['video']).is_file())
+                self.assertTrue(Path(output['thumbnail']).is_file())
+                self.assertIn('Genshin Impact',Path(output['title']).read_text())
+                self.assertTrue(Path(output['review']).is_file())
+                self.assertTrue(src.is_file())
+            finally:
+                if previous is None:
+                    os.environ.pop('LOCALAPPDATA',None)
+                else:
+                    os.environ['LOCALAPPDATA'] = previous
+
     def test_ui_contains_beta_review_and_preset_reload(self):
         app=(BASE/'source'/'app.py').read_text(encoding='utf-8')
         self.assertIn('def scan_selected(self)',app)
