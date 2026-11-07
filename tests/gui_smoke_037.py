@@ -8,6 +8,8 @@ import json
 import os
 import random
 import subprocess
+import queue
+import threading
 import tempfile
 import tkinter as tk
 import types
@@ -37,7 +39,8 @@ for node in root_ast.body:
         nodes.append(node)
 ns = {
     'os': os, 'tk': tk, 'ttk': ttk, 'Path': Path, 'tempfile': tempfile,
-    'json': json, 'random': random, 'filedialog': filedialog,
+    'json': json, 'random': random, 'queue': queue, 'threading': threading,
+    'filedialog': filedialog,
     'messagebox': messagebox, 'subprocess': subprocess,
     'quality_engine': types.SimpleNamespace(load_preferences=lambda: {'presets': {}})
 }
