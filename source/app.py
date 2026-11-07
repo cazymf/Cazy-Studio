@@ -44,7 +44,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.12  |  AutoDirector Full Run')
+        self.title('Cazy Studio v0.3.13  |  Preset Display and Detection Diagnostics')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
@@ -711,16 +711,28 @@ class Studio(tk.Tk):
     def open_update_center(self):
         update_center.open_update_center(self)
 
-    def open_quality_lab(self):
+    def open_quality_lab(self, selected_preset=None, source_path=None):
+        # Opening Quality Lab from AutoDirector must show its selected recipe,
+        # rather than the last-used or hardcoded default settings.
+        if selected_preset is None and self.active_section == 'autodirector':
+            selected_preset = self.autodirector_view.preset_var.get()
+            if source_path is None:
+                i = self.autodirector_view._selected()
+                if i >= 0:
+                    source_path = self.autodirector_view.state['queue'][i]['path']
         if self.quality_lab_window is not None:
             try:
                 if self.quality_lab_window.winfo_exists():
+                    if source_path and Path(source_path).is_file():
+                        self.quality_lab_window.load_path(source_path)
+                    if selected_preset and selected_preset != 'Use last-used settings':
+                        self.quality_lab_window.apply_named_preset(selected_preset)
                     self.quality_lab_window.lift()
                     return
             except tk.TclError:pass
-        preferred=None
+        preferred=source_path if source_path and Path(source_path).is_file() else None
         timeline_clip=None
-        if 0<=self.selected<len(self.project.clips):
+        if preferred is None and 0<=self.selected<len(self.project.clips):
             clip=self.project.clips[self.selected]
             if clip.kind=='video':
                 preferred=clip.path
@@ -729,7 +741,8 @@ class Studio(tk.Tk):
             for p in self.media_paths:
                 if engine.kind_for(p)=='video' and os.path.isfile(p):
                     preferred=p;break
-        self.quality_lab_window=quality_ui.QualityLab(self,preferred,timeline_clip=timeline_clip)
+        self.quality_lab_window=quality_ui.QualityLab(
+            self,preferred,timeline_clip=timeline_clip,selected_preset=selected_preset)
 
     def _close_cached_capture(self):
         # A worker thread owns the video capture. Never release it on the UI thread.
@@ -1279,9 +1292,16 @@ class AutoDirectorView(tk.Frame):
         self.preset_combo = self._combo(options, self.preset_var,
                                        ('Use last-used settings',))
         self.preset_combo.pack(fill='x', padx=15, pady=(4, 4))
+        self.preset_combo.bind('<<ComboboxSelected>>', self.on_saved_preset_change)
         self._button(options, 'Reload Saved Presets', self.reload_presets).pack(anchor='w', padx=15, pady=(0, 4))
+        self._button(options, 'View / Edit Saved Recipe in Quality Lab',
+                     self.open_selected_preset_in_quality_lab).pack(anchor='w', padx=15, pady=(0, 4))
         self.preset_hint = self._label(options, 'Loading named presets...', 9, MUTED)
-        self.preset_hint.pack(anchor='w', padx=15, pady=(0, 9))
+        self.preset_hint.pack(anchor='w', padx=15, pady=(0, 4))
+        self.recipe_details_var = tk.StringVar(value='Choose a saved recipe to preview its settings.')
+        tk.Label(options, textvariable=self.recipe_details_var, bg=CARD2, fg=TEXT,
+                 font=('Segoe UI', 9), anchor='w', justify='left',
+                 wraplength=310, padx=10, pady=8).pack(fill='x', padx=15, pady=(0, 10))
         self._label(options, 'ABYSS DETECTION REFERENCES', 11, ACCENT2, True).pack(anchor='w', padx=15, pady=(0, 5))
         self._button(options, 'Manage Multiple Screenshots', self.manage_references).pack(anchor='w', padx=15)
         self.reference_hint = self._label(options, 'Start / Other Side / Completed', 9, MUTED)
@@ -1351,6 +1371,7 @@ class AutoDirectorView(tk.Frame):
         if self.preset_var.get() not in names:
             self.preset_var.set(names[0])
         self.preset_hint.configure(text=f'{len(names)-1} saved Quality Lab presets')
+        self.update_saved_recipe_details()
         references = autodirector_fullrun.normalize_references(
             self.state.get('references',{}),self.state.get('success_reference',''))
         self.reference_hint.configure(text='  •  '.join(
@@ -1506,6 +1527,29 @@ class AutoDirectorView(tk.Frame):
             f'{count} selected video(s) prepared with local music assignments. '
             'Choose a selected video and click SCAN SELECTED VIDEO to test detection.')
 
+
+    def on_saved_preset_change(self, event=None):
+        self.save()
+        self.update_saved_recipe_details()
+
+    def update_saved_recipe_details(self):
+        try:
+            selected = self.preset_var.get()
+            recipe = quality_engine.resolve_saved_render_preset(selected)
+            self.recipe_details_var.set(
+                f'{selected or "Use last-used settings"}\n'
+                f'{recipe.resolution}  |  '
+                f'{recipe.fps if recipe.fps else "Source"} FPS\n'
+                f'{recipe.upscale}  |  {recipe.frame_method}\n'
+                f'{recipe.encoder}  |  {recipe.quality}')
+        except (OSError, ValueError) as exc:
+            self.recipe_details_var.set('Cannot read saved preset: ' + str(exc))
+
+    def open_selected_preset_in_quality_lab(self):
+        name = self.preset_var.get()
+        i = self._selected()
+        source_path = self.state['queue'][i]['path'] if i >= 0 else None
+        self.winfo_toplevel().open_quality_lab(selected_preset=name,source_path=source_path)
 
     def reload_presets(self):
         previous = self.preset_var.get()
