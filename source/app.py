@@ -1579,41 +1579,11 @@ class AutoDirectorView(tk.Frame):
         if self.mode_var.get() == 'Full Run':
             self.scan_entire_full_run()
             return
-        messagebox.showinfo('Text detection', 'Text-only Abyss scanning is available in Full Run mode.\n'
-                            'Select Full Run to detect both sides and join them into one video.',
-                            parent=self)
-        return
-        selected = self._selected()
-        if selected < 0:
-            messagebox.showinfo('Select a video', 'Select one of your videos first.', parent=self)
-            return
-        if self._auto_busy:
-            messagebox.showinfo('AutoDirector busy', 'A scan or render is currently running.', parent=self)
-            return
-        path = self.state['queue'][selected]['path']
-        if not Path(path).is_file():
-            messagebox.showerror('Missing video', 'The selected video is missing.', parent=self)
-            return
-        reference = self.state.get('success_reference', '')
-        if reference and not Path(reference).is_file():
-            messagebox.showerror('Missing example screenshot', 'Please select a new success screenshot.', parent=self)
-            return
-        if not self.save():
-            return
-        self._auto_busy = True
-        self._auto_cancel.clear()
-        self.status_var.set('Scanning for Genshin challenge transitions…')
-
-        def background():
-            try:
-                results = quality_engine.cazy_detect_genshin(
-                    path, reference_path=reference,
-                    progress=lambda n: self._auto_messages.put(('progress', n)),
-                    cancel=self._auto_cancel)
-                self._auto_messages.put(('scan_done', results))
-            except Exception as exc:
-                self._auto_messages.put(('error', str(exc)))
-        threading.Thread(target=background, daemon=True).start()
+        messagebox.showinfo(
+            'Text detection',
+            'Text-based Abyss detection currently runs in Full Run mode.\n'
+            'Select Full Run to cut both halves and join every completed chamber.',
+            parent=self)
 
     def _poll_auto_messages(self):
         try:
