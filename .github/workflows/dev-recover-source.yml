@@ -1,0 +1,47 @@
+name: Recover Cazy Studio v0.3.6 source for AutoDirector development
+on:
+  push:
+    branches: [feature/autodirector-037-library]
+    paths: ['.github/workflows/dev-recover-source.yml']
+permissions:
+  contents: write
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/autodirector-037-library
+          persist-credentials: true
+      - name: Extract verified release sources
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p source /tmp/cazy036 /tmp/cazy035
+          gh release download v0.3.6 --repo "$GITHUB_REPOSITORY" --pattern 'Cazy_Studio_v0_3_6_Update.zip' --dir /tmp/cazy036
+          gh release download v0.3.5 --repo "$GITHUB_REPOSITORY" --pattern 'Cazy_Studio_v0_3_5_Update.zip' --dir /tmp/cazy035
+          python - <<'PY'
+          from pathlib import Path
+          import json,hashlib,zipfile
+          sources=[
+            (Path('/tmp/cazy036/Cazy_Studio_v0_3_6_Update.zip'), ['app.py','update_core.py','version.py'],'0.3.6'),
+            (Path('/tmp/cazy035/Cazy_Studio_v0_3_5_Update.zip'), ['quality_engine.py','quality_ui.py'],'0.3.5'),
+          ]
+          for path, names, version in sources:
+              with zipfile.ZipFile(path) as z:
+                  manifest=json.loads(z.read('update_manifest.json'))
+                  assert manifest['version']==version
+                  for name in names:
+                      data=z.read(name)
+                      assert hashlib.sha256(data).hexdigest()==manifest['files'][name],name
+                      Path('source',name).write_bytes(data)
+                      print(name,len(data))
+          PY
+          python -m compileall -q source
+      - name: Commit baseline source files to feature branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add source/
+          git diff --cached --quiet || (git commit -m "Recover verified v0.3.6 Python baseline into source folder" && git push origin HEAD:feature/autodirector-037-library)
