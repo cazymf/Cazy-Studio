@@ -7,6 +7,7 @@ import ast
 import json
 import os
 import random
+import types
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +28,8 @@ def load_helpers():
               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
               and node.name in HELPERS]
     ns = {'os': os, 'Path': Path, 'tempfile': tempfile, 'json': json,
+          'autodirector_fullrun': types.SimpleNamespace(
+              normalize_references=lambda refs, old='': refs if isinstance(refs,dict) else {}),
           'random': random, '_AUTODIRECTOR_MAX_JOBS': 500,
           '_AUTODIRECTOR_VIDEO_EXTS': {'.mp4', '.mkv', '.mov', '.avi', '.webm', '.m4v'},
           '_AUTODIRECTOR_MUSIC_EXTS': {'.mp3', '.wav', '.m4a', '.flac', '.ogg', '.aac'},
