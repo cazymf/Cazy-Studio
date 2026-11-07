@@ -1,0 +1,64 @@
+name: Validate Cazy Studio v0.3.10 Real-ESRGAN Grid Fix
+on:
+  push:
+    branches: [fix/realesrgan-x4-model-0310]
+    paths:
+      - 'source/**'
+      - 'tests/**'
+      - '.github/workflows/test-realesrgan-fix-0310.yml'
+permissions:
+  contents: read
+jobs:
+  test-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install media test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb
+      - name: Test model native scale and existing functionality
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Test updater package and rollback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy0310/old /tmp/cazy0310/stage /tmp/cazy0310/out
+          gh release download v0.3.9 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_9_Update.zip' --dir /tmp/cazy0310/old
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy0310/stage/
+          PYTHONPATH=source python - <<'PY'
+          from pathlib import Path
+          import tempfile,zipfile
+          from update_core import build_update_zip,inspect_update_zip,apply_update_zip,rollback_latest
+          old=Path('/tmp/cazy0310/old/Cazy_Studio_v0_3_9_Update.zip')
+          target=Path('/tmp/cazy0310/out/Cazy_Studio_v0_3_10_Update.zip')
+          previous=inspect_update_zip(old,'0.3.9')
+          manifest=build_update_zip('/tmp/cazy0310/stage',target,'0.3.10')
+          assert set(manifest['files'])=={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          with tempfile.TemporaryDirectory() as folder:
+              root=Path(folder)
+              with zipfile.ZipFile(old) as z:
+                  for name in previous['files']:
+                      (root/name).write_bytes(z.read(name))
+              apply_update_zip(target,root,'0.3.10')
+              assert (root/'version.py').read_text().strip()=="APP_VERSION = '0.3.10'"
+              assert (root/'quality_engine.py').read_bytes()==Path('source/quality_engine.py').read_bytes()
+              rollback_latest(root)
+              assert (root/'version.py').read_text().strip()=="APP_VERSION = '0.3.9'"
+          print('v0.3.10 update install and rollback: PASS')
+          PY
+      - name: Upload validated preview
+        uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_10_PREVIEW
+          path: /tmp/cazy0310/out/Cazy_Studio_v0_3_10_Update.zip
+          if-no-files-found: error

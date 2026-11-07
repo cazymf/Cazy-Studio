@@ -321,6 +321,21 @@ def _start_duration(info, opts, sample):
     return d
 
 
+def _realesrgan_profile(upscale):
+    """Match the ncnn model with its NATIVE inference scale.
+
+    The General x4plus model ships as an x4 network. Passing -s 2 to x4plus
+    can yield severely corrupted square-tile output on some builds/drivers.
+    The AnimeVideoV3 model has dedicated x2 weights and safely uses -s 2.
+    The final FFmpeg stage scales to the user-selected output resolution.
+    """
+    if upscale == 'Real-ESRGAN Anime':
+        return 'realesr-animevideov3', 2
+    if upscale == 'Real-ESRGAN General':
+        return 'realesrgan-x4plus', 4
+    raise ValueError('Unknown Real-ESRGAN model: ' + str(upscale))
+
+
 def _run_ai_sequence(path, info, opts, w, h, fps, dur, tmp, root, status, cancel, stage_progress=None):
     """AI sequence optimized for the actual output crop and resolution.
 
@@ -378,18 +393,33 @@ def _run_ai_sequence(path, info, opts, w, h, fps, dur, tmp, root, status, cancel
         if status:status(f'Real-ESRGAN processing {len(list(active.glob("*.png"))):,} cropped frames…')
         out=Path(tmp)/'upscaled';out.mkdir()
         exe=Path(addons['Real-ESRGAN'])
-        model='realesr-animevideov3' if opts.upscale=='Real-ESRGAN Anime' else 'realesrgan-x4plus'
+        model,model_scale=_realesrgan_profile(opts.upscale)
+        if status and model_scale==4:
+            status('Real-ESRGAN General uses native 4x processing; final encode downscales to your chosen resolution.')
         import install_ai_addons
         model_dir=install_ai_addons.find_model_directory(exe,'RealESRGAN')
         if model_dir is None:raise RuntimeError('Real-ESRGAN model files are missing. Open AI Addons Setup to repair or reinstall.')
         target_count=sum(1 for _ in active.glob('*.png'))
-        _run([str(exe),'-i',str(active),'-o',str(out),'-n',model,'-m',str(model_dir),'-s','2','-f','png'],
+        _run([str(exe),'-i',str(active),'-o',str(out),'-n',model,'-m',str(model_dir),'-s',str(model_scale),'-f','png'],
              status,cancel,cwd=str(exe.parent),progress_dir=out,
              progress_total=target_count,progress_label='Real-ESRGAN',
              on_progress=(lambda f,d,t:stage_progress('upscale',f,d,t)) if stage_progress else None)
         outcount=sum(1 for _ in out.glob('*.png'))
         if outcount!=target_count:
             raise RuntimeError(f'Real-ESRGAN processed {outcount}/{target_count} frames; cannot safely encode an incomplete sequence')
+        # Check native output geometry before encoding. This catches wrong
+        # scale/model pairs rather than silently producing a damaged MP4.
+        from PIL import Image as _CazyImage
+        expected_pixels=(ai_w*model_scale, ai_h*model_scale)
+        upscaled_files=sorted(out.glob('*.png'))
+        for sample_png in (upscaled_files[0], upscaled_files[-1]):
+            with _CazyImage.open(sample_png) as sample_img:
+                actual_pixels=sample_img.size
+            if actual_pixels!=expected_pixels:
+                raise RuntimeError(
+                    f'Real-ESRGAN model/scale mismatch: expected {expected_pixels[0]}x'
+                    f'{expected_pixels[1]}, received {actual_pixels[0]}x{actual_pixels[1]}. '
+                    'Choose a different model or repair the AI addons before rerendering.')
         if status:status('AI frames complete; freeing input-frame scratch space…')
         shutil.rmtree(active)
         active=out
