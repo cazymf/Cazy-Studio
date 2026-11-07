@@ -1,0 +1,85 @@
+name: Validate v0.3.15 Windows OCR Console Hotfix
+on:
+  push:
+    branches: [fix/ocr-windows-console-0315]
+    paths: ['source/**','tests/**','.github/workflows/test-windows-ocr-0315.yml']
+permissions:
+  contents: read
+jobs:
+  linux-regressions-and-updater:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install local media and OCR test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg tesseract-ocr tesseract-ocr-eng
+      - name: Run all tests and UI smoke
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Verify safe update against installed v0.3.14 updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy315/base /tmp/cazy315/stage /tmp/cazy315/out
+          gh release download v0.3.14 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_14_Update.zip' --dir /tmp/cazy315/base
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy315/stage
+          PYTHONPATH=source python - <<'PY'
+          from pathlib import Path
+          import tempfile,zipfile,importlib.util
+          from update_core import build_update_zip
+          root=Path('/tmp/cazy315')
+          old=root/'base/Cazy_Studio_v0_3_14_Update.zip'
+          update=root/'out/Cazy_Studio_v0_3_15_Update.zip'
+          manifest=build_update_zip(root/'stage',update,'0.3.15')
+          allowed={'app.py','quality_engine.py','quality_ui.py',
+                   'update_core.py','version.py'}
+          assert set(manifest['files'])==allowed
+          with tempfile.TemporaryDirectory() as d:
+              folder=Path(d)
+              oldmodule=folder/'legacy.py'
+              with zipfile.ZipFile(old) as z:
+                  oldmodule.write_bytes(z.read('update_core.py'))
+              spec=importlib.util.spec_from_file_location('legacy_updater',oldmodule)
+              legacy=importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(legacy)
+              assert allowed.issubset(legacy.SAFE_FILES)
+              assert set(legacy.inspect_update_zip(update,'0.3.15')['files'])==allowed
+              installed=folder/'installed'
+              installed.mkdir()
+              with zipfile.ZipFile(old) as z:
+                  prev=legacy.inspect_update_zip(old,'0.3.14')
+                  for name in prev['files']:
+                      (installed/name).write_bytes(z.read(name))
+              legacy.apply_update_zip(update,installed,'0.3.15')
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.15'"
+              assert 'creationflags=_cazy_subprocess_flags()' in (installed/'quality_engine.py').read_text()
+              legacy.rollback_latest(installed)
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.14'"
+          print('v0.3.14 updater accepted and rolled back silent-OCR v0.3.15: PASS')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_15_HOTFIX_PREVIEW
+          path: /tmp/cazy315/out/Cazy_Studio_v0_3_15_Update.zip
+          if-no-files-found: error
+  windows-hidden-console:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Windows test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --quiet opencv-python-headless numpy pillow
+      - name: Prove Windows no-console flag and OCR subprocess call
+        shell: pwsh
+        run: |
+          python -m unittest discover -s tests -p 'test_ocr_abyss_0314.py' -v
