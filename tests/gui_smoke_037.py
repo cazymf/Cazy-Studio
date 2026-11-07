@@ -42,7 +42,14 @@ ns = {
     'json': json, 'random': random, 'queue': queue, 'threading': threading,
     'filedialog': filedialog,
     'messagebox': messagebox, 'subprocess': subprocess,
-    'quality_engine': types.SimpleNamespace(load_preferences=lambda: {'presets': {}})
+    'quality_engine': types.SimpleNamespace(load_preferences=lambda: {'presets': {}}),
+    'autodirector_fullrun': types.SimpleNamespace(
+        normalize_references=lambda refs, old='': {
+            k:list(refs.get(k,[])) for k in ('start','switch','complete','failure','blessing')},
+        REFERENCE_KINDS={
+            'start':'Start Challenge','switch':'On the other side...',
+            'complete':'Challenge Completed','failure':'Challenge Failed / Retry',
+            'blessing':'Floor / Benediction'},SEGMENT_MAX=200)
 }
 exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), ns)
 
@@ -74,6 +81,20 @@ with tempfile.TemporaryDirectory() as temp:
         assert not view.state['queue']
         assert view.empty_hint.winfo_manager() == 'pack'
         assert recording.is_file() and unused.is_file()
+        # The Full Run review is a separate visible table containing BOTH halves.
+        full_run={'completed_chambers':1,'reports':[{'duration':14.}],
+                  'segments':[
+                      {'path':str(recording),'chamber':1,'side':'First Half',
+                       'start':0.,'end':6.,'enabled':True,'evidence':'start->switch'},
+                      {'path':str(recording),'chamber':1,'side':'Second Half',
+                       'start':7.,'end':13.,'enabled':True,'evidence':'start->complete'}]}
+        view.review_full_run(full_run)
+        window.update_idletasks()
+        assert view._review_window.winfo_exists()
+        tree=[child for child in view._review_window.winfo_children()[0].winfo_children()
+              if isinstance(child,ttk.Treeview)][0]
+        assert len(tree.get_children())==2
+        view._review_window.destroy()
         print('AutoDirector GUI smoke: PASS (open, add, select, save, remove, empty state)')
     finally:
         window.destroy()
