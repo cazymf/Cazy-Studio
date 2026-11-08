@@ -368,7 +368,7 @@ def _rife_interpolation_command(executable, frames_dir, out_dir, input_count, so
     if candidates:
         # Prefer the highest available v4 revision, not the program's v2.3 default.
         model = max(candidates.values(), key=lambda p: (
-            tuple(int(part) for part in re.findall(r"\\d+", p.name)), str(p)))
+            tuple(int(part) for part in re.findall(r"\d+", p.name)), str(p)))
         expected = max(2, int(round(input_count * output_fps / source_fps)))
         command += ["-m", str(model), "-n", str(expected)]
         model_description = model.name
