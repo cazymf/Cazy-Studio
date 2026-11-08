@@ -337,6 +337,55 @@ def _realesrgan_profile(upscale):
     raise ValueError('Unknown Real-ESRGAN model: ' + str(upscale))
 
 
+def _rife_interpolation_command(executable, frames_dir, out_dir, input_count, source_fps, output_fps):
+    """Select an installed RIFE-v4 model for custom frame counts.
+
+    Without -m, rife-ncnn-vulkan defaults to the legacy rife-v2.3 model, even
+    if v4 weights are installed. Legacy models reject the -n flag: they support
+    only the binary's default 2x output. Never mislabel those frames with a
+    different requested FPS.
+    """
+    executable = Path(executable)
+    if source_fps <= 0 or output_fps <= source_fps:
+        raise ValueError("RIFE requires an output FPS greater than the source FPS")
+    if input_count < 2:
+        raise ValueError("RIFE needs at least two input frames")
+    model_dirs = (
+        executable.parent / "models",
+        executable.parent,
+        executable.parent.parent / "models",
+    )
+    candidates = {}
+    for folder in model_dirs:
+        if not folder.is_dir():
+            continue
+        for candidate in folder.glob("rife-v4*"):
+            if (candidate.is_dir()
+                    and any(candidate.glob("*.param"))
+                    and any(candidate.glob("*.bin"))):
+                candidates[str(candidate.resolve())] = candidate
+    command = [str(executable), "-i", str(frames_dir), "-o", str(out_dir)]
+    if candidates:
+        # Prefer the highest available v4 revision, not the program's v2.3 default.
+        model = max(candidates.values(), key=lambda p: (
+            tuple(int(part) for part in re.findall(r"\\d+", p.name)), str(p)))
+        expected = max(2, int(round(input_count * output_fps / source_fps)))
+        command += ["-m", str(model), "-n", str(expected)]
+        model_description = model.name
+    else:
+        # The default non-v4 model supports 2x only, with -n omitted.
+        ratio = output_fps / source_fps
+        if abs(ratio - 2.0) > 0.025:
+            raise RuntimeError(
+                f"RIFE {source_fps:g} -> {output_fps:g} FPS requires RIFE v4 "
+                "model files. Install or repair the RIFE AI addon using AI "
+                "Addons Setup; an older RIFE model supports only 2x FPS.")
+        expected = input_count * 2
+        model_description = "legacy default (2x)"
+    command += ["-f", "%08d.png"]
+    return command, expected, model_description
+
+
 def _run_ai_sequence(path, info, opts, w, h, fps, dur, tmp, root, status, cancel, stage_progress=None):
     """AI sequence optimized for the actual output crop and resolution.
 
@@ -378,10 +427,12 @@ def _run_ai_sequence(path, info, opts, w, h, fps, dur, tmp, root, status, cancel
     if rife:
         if status:status(f'RIFE interpolating {count} frames to {fps} FPS…')
         newdir=Path(tmp)/'rife_output';newdir.mkdir()
-        target_count=max(count,int(round((count-1)*fps/source_fps))+1)
         exe=Path(addons['RIFE'])
-        _run([str(exe),'-i',str(active),'-o',str(newdir),'-n',str(target_count),'-f','%08d.png'],
-             status,cancel,cwd=str(exe.parent),progress_dir=newdir,
+        command,target_count,model_description=_rife_interpolation_command(
+            exe,active,newdir,count,source_fps,fps)
+        if status:
+            status(f'RIFE model: {model_description}; generating {target_count} frames')
+        _run(command,status,cancel,cwd=str(exe.parent),progress_dir=newdir,
              progress_total=target_count,progress_label='RIFE interpolation',
              on_progress=(lambda f,d,t:stage_progress('rife',f,d,t)) if stage_progress else None)
         newcount=sum(1 for _ in newdir.glob('*.png'))
