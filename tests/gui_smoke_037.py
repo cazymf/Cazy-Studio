@@ -7,6 +7,7 @@ import ast
 import json
 import os
 import random
+import time
 import subprocess
 import queue
 import threading
@@ -39,7 +40,7 @@ for node in root_ast.body:
         nodes.append(node)
 ns = {
     'os': os, 'tk': tk, 'ttk': ttk, 'Path': Path, 'tempfile': tempfile,
-    'json': json, 'random': random, 'queue': queue, 'threading': threading,
+    'json': json, 'random': random, 'time': time, 'queue': queue, 'threading': threading,
     'filedialog': filedialog,
     'messagebox': messagebox, 'subprocess': subprocess,
     'quality_engine': types.SimpleNamespace(
@@ -117,6 +118,36 @@ with tempfile.TemporaryDirectory() as temp:
               if isinstance(child,ttk.Treeview)][0]
         assert len(tree.get_children())==2
         view._review_window.destroy()
-        print('AutoDirector GUI smoke: PASS (open, add, select, save, remove, empty state)')
+
+        # Render progress must be shown in the same visible main panel as OCR
+        # scan progress, not merely in a hidden application footer.
+        view._auto_busy=True
+        view._begin_auto_render('Preparing 2 reviewed halves')
+        window.update_idletasks()
+        assert view.scan_progress_var.get()==0.
+        assert 'RENDERING' in view.scan_state_var.get()
+        view._auto_messages.put(('render_progress',(42.5,
+            'Half 1/2: RIFE AI interpolation • 17.4 FPS • ETA 9s')))
+        view._poll_auto_messages()
+        window.update_idletasks()
+        assert abs(view.scan_progress_var.get()-42.5)<.001
+        assert '42.5%' in view.scan_state_var.get()
+        assert 'RIFE AI interpolation' in view.scan_detail_var.get()
+        assert view.scan_bar.winfo_manager()=='pack'
+        # Out-of-range updates cannot overrun the bar.
+        view._auto_messages.put(('render_progress',(112,'Joining reviewed halves')))
+        view._poll_auto_messages()
+        assert view.scan_progress_var.get()==100.
+        previous_showinfo=messagebox.showinfo
+        messagebox.showinfo=lambda *a,**k:None
+        try:
+            view._auto_messages.put(('render_done',{'video':str(recording)}))
+            view._poll_auto_messages()
+            assert view.scan_state_var.get()=='RENDER COMPLETE — 100%'
+            assert view.scan_progress_var.get()==100.
+            assert not view._auto_busy
+        finally:
+            messagebox.showinfo=previous_showinfo
+        print('AutoDirector GUI smoke: PASS (library, Full Run review, visible render progress)')
     finally:
         window.destroy()
