@@ -131,7 +131,9 @@ class SavedPresetAndDetectionTests(unittest.TestCase):
                          key=lambda k:abs(colors[k]-val))
                 return kind,.97,'Recognized game text'
             with mock.patch.object(quality,'_cazy_tesseract',return_value='fake-local-ocr'), \
-                 mock.patch.object(quality,'read_abyss_frame_text',fake_ocr):
+                 mock.patch.object(quality,'read_abyss_frame_text',fake_ocr), \
+                 mock.patch.object(quality,'read_abyss_start_text',
+                                   return_value=(None,0.,'')):
                 result=quality.scan_abyss_recording(
                     recording,{},sample_seconds=1)
             counts=result['event_counts']
