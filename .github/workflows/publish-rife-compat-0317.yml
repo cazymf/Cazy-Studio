@@ -17,7 +17,7 @@ jobs:
           python -m pip install --quiet opencv-python-headless numpy pillow
           sudo apt-get update -qq
           sudo apt-get install -y python3-tk xvfb ffmpeg tesseract-ocr tesseract-ocr-eng
-      - name: Regression-test RIFE model negotiation, OCR and Full Run GUI
+      - name: Regression-test RIFE negotiation, OCR, legacy version checks and Full Run GUI
         run: |
           set -euo pipefail
           python -m compileall -q source tests
