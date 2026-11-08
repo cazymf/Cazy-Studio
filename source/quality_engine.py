@@ -1225,7 +1225,7 @@ def _cazy_subprocess_flags(platform=None):
     return getattr(subprocess,'CREATE_NO_WINDOW',0) if name=='nt' else 0
 
 
-def read_abyss_start_text(frame, executable, cancel=None):
+def read_abyss_start_text(frame, executable, cancel=None, threshold=False):
     """Fast, focused OCR for the short-lived Start Challenge interaction HUD.
 
     The general OCR pass runs ~0.8 seconds apart and can miss the prompt
@@ -1249,31 +1249,29 @@ def read_abyss_start_text(frame, executable, cancel=None):
     gray=cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
     gray=cv2.resize(gray,None,fx=2.,fy=2.,
                     interpolation=cv2.INTER_CUBIC)
-    for variant in (gray,cv2.threshold(gray,0,255,
-                    cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1]):
-        if cancel is not None and cancel.is_set():
-            raise RuntimeError('Scan cancelled')
-        ok,png=cv2.imencode('.png',variant)
-        if not ok:
-            continue
-        try:
-            result=subprocess.run(
-                [executable,'stdin','stdout','--psm','6','-l','eng'],
-                input=png.tobytes(),capture_output=True,timeout=7,
-                check=False,creationflags=_cazy_subprocess_flags())
-        except subprocess.TimeoutExpired:
-            continue
-        except OSError as exc:
-            raise RuntimeError('Could not run local Tesseract: '+str(exc)) from exc
-        if result.returncode:
-            stderr=result.stderr.decode('utf-8','replace')
-            if 'Error opening data file' in stderr:
-                raise RuntimeError('Tesseract English OCR language data is missing.')
-            continue
-        raw=result.stdout.decode('utf-8','replace')
-        if classify_screen_text(raw)=='start':
-            return 'start',.98,'Fast Start OCR: '+' '.join(raw.split())[:100]
-        # Most readable prompts are recognized without the second threshold pass.
+    if threshold:
+        gray=cv2.threshold(gray,0,255,
+                           cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1]
+    ok,png=cv2.imencode('.png',gray)
+    if not ok:
+        return None,0.,''
+    try:
+        result=subprocess.run(
+            [executable,'stdin','stdout','--psm','6','-l','eng'],
+            input=png.tobytes(),capture_output=True,timeout=7,
+            check=False,creationflags=_cazy_subprocess_flags())
+    except subprocess.TimeoutExpired:
+        return None,0.,''
+    except OSError as exc:
+        raise RuntimeError('Could not run local Tesseract: '+str(exc)) from exc
+    if result.returncode:
+        stderr=result.stderr.decode('utf-8','replace')
+        if 'Error opening data file' in stderr:
+            raise RuntimeError('Tesseract English OCR language data is missing.')
+        return None,0.,''
+    raw=result.stdout.decode('utf-8','replace')
+    if classify_screen_text(raw)=='start':
+        return 'start',.98,'Fast Start OCR: '+' '.join(raw.split())[:100]
     return None,0.,''
 
 
@@ -1569,8 +1567,11 @@ def scan_abyss_recording(path,references=None,progress=None,cancel=None,
                 if (want_start and not profile['black_blank']
                         and not profile['transition']
                         and t>=next_start_ocr-.0001):
+                    # Alternate the original grayscale view with binary
+                    # thresholding; one Tesseract call per short time slice.
                     kind,confidence,evidence=read_abyss_start_text(
-                        frame,executable,cancel=cancel)
+                        frame,executable,cancel=cancel,
+                        threshold=(int(t/start_every+.001)%4==3))
                     next_start_ocr=t+start_every
                 immediate_transition=(profile['transition']
                                       and t-last_transition_ocr>=.25)
