@@ -4,6 +4,7 @@ Load only the AutoDirector window class and queue helpers from app.py; avoid
 the unrelated editor's optional video/AI modules in this GUI smoke test.
 """
 import ast
+import hashlib
 import json
 import os
 import random
@@ -22,7 +23,9 @@ root_ast = ast.parse(path.read_text(encoding='utf-8'))
 wanted = {
     '_autodirector_path', '_autodirector_defaults', '_autodirector_validate',
     '_autodirector_load', '_autodirector_save', '_autodirector_add',
-    '_autodirector_tracks', '_autodirector_prepare'
+    '_autodirector_tracks', '_autodirector_prepare',
+    '_autodirector_scan_cache_path', '_autodirector_source_fingerprint',
+    '_autodirector_save_scan_cache', '_autodirector_load_scan_cache'
 }
 nodes = []
 for node in root_ast.body:
@@ -40,7 +43,7 @@ for node in root_ast.body:
         nodes.append(node)
 ns = {
     'os': os, 'tk': tk, 'ttk': ttk, 'Path': Path, 'tempfile': tempfile,
-    'json': json, 'random': random, 'time': time, 'queue': queue, 'threading': threading,
+    'json': json, 'hashlib': hashlib, 'random': random, 'time': time, 'queue': queue, 'threading': threading,
     'filedialog': filedialog,
     'messagebox': messagebox, 'subprocess': subprocess,
     'quality_engine': types.SimpleNamespace(
@@ -53,6 +56,7 @@ ns = {
     'autodirector_fullrun': types.SimpleNamespace(
         normalize_references=lambda refs, old='': {
             k:list(refs.get(k,[])) for k in ('start','switch','complete','failure','blessing')},
+        SEGMENT_MAX=200,
         REFERENCE_KINDS={
             'start':'Start Challenge','switch':'On the other side...',
             'complete':'Challenge Completed','failure':'Challenge Failed / Retry',
@@ -117,6 +121,15 @@ with tempfile.TemporaryDirectory() as temp:
         tree=[child for child in view._review_window.winfo_children()[0].winfo_children()
               if isinstance(child,ttk.Treeview)][0]
         assert len(tree.get_children())==2
+        view._review_window.destroy()
+        # A previously scanned run is reusable after the dialog closes.
+        ns['_autodirector_save_scan_cache'](full_run,[str(recording)])
+        view.reopen_saved_full_run()
+        window.update_idletasks()
+        assert view._review_window.winfo_exists()
+        assert 'SAVED SCAN READY' in view.scan_state_var.get()
+        assert len([x for x in view._review_window.winfo_children()[0].winfo_children()
+                    if isinstance(x,ttk.Treeview)][0].get_children())==2
         view._review_window.destroy()
 
         # Render progress must be shown in the same visible main panel as OCR
