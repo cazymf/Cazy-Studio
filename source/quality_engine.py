@@ -228,6 +228,43 @@ def _filter_chain(info: engine.MediaInfo, opts: QualitySettings, *,
     return fs
 
 
+def _cazy_render_error_log_path():
+    """Persistent local diagnostic file; never uploads or deletes source media."""
+    appdata=os.environ.get('LOCALAPPDATA')
+    base=Path(appdata) if appdata else Path.home()/'.cazy_studio'
+    return base/'CazyStudio'/'logs'/'last_render_error.log'
+
+
+def _save_cazy_render_error(summary, command=None, stderr='', traceback_text=''):
+    """Keep the actual failing command and return code even if stderr is empty.
+
+    Report the log path to the UI, but never replace the original render error
+    if local app data is temporarily unwritable.
+    """
+    from datetime import datetime, timezone
+    path=_cazy_render_error_log_path()
+    try:
+        path.parent.mkdir(parents=True,exist_ok=True)
+        lines=[
+            'Cazy Studio local rendering diagnostics',
+            'Time (UTC): '+datetime.now(timezone.utc).isoformat(),
+            str(summary),
+        ]
+        if command:
+            lines.append('Command: '+subprocess.list2cmdline(list(map(str,command))))
+        if stderr:
+            lines.extend(['External process stderr:',str(stderr)[-15000:]])
+        else:
+            lines.append('External process stderr: (empty / not provided)')
+        if traceback_text:
+            lines.extend(['Python traceback:',str(traceback_text)[-15000:]])
+        path.write_text('\n'.join(lines)+'\n',encoding='utf-8',
+                        errors='replace')
+        return str(path)
+    except OSError:
+        return ''
+
+
 def _run(cmd:list[str], on_status=None, cancel=None, cwd=None,
          progress_dir=None, progress_total=0, progress_label='AI processing',
          on_progress=None, ffmpeg_duration=None, ffmpeg_fps=None):
@@ -295,7 +332,19 @@ def _run(cmd:list[str], on_status=None, cancel=None, cwd=None,
                     time.sleep(.10)
                 if proc.returncode!=0:
                     errout.seek(0)
-                    raise RuntimeError('Processing failed:\n'+errout.read()[-3500:])
+                    stderr=errout.read()[-12000:].strip()
+                    code=int(proc.returncode)
+                    detail=stderr or (
+                        'The external renderer exited without writing an error. '
+                        'The exit code and exact command are saved in the local log.')
+                    summary=(f'{Path(cmd[0]).name} exited with code {code} '
+                             f'(0x{code & 0xFFFFFFFF:08X})')
+                    log=_save_cazy_render_error(
+                        summary,command=args,stderr=stderr)
+                    message='Processing failed: '+summary+'\n'+detail[-1800:]
+                    if log:
+                        message+='\n\nError log: '+log
+                    raise RuntimeError(message)
                 if on_progress:
                     if progress_dir:
                         final_total=int(progress_total)
