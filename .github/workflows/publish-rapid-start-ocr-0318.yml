@@ -66,7 +66,7 @@ jobs:
               assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.17'"
           print('v0.3.17 updater installed/rolled back v0.3.18: PASS')
           PY
-      - name: Publish tested rapid Start Challenge OCR update
+      - name: Publish verified rapid Start Challenge OCR update
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -78,7 +78,7 @@ jobs:
             gh release create v0.3.18 Cazy_Studio_v0_3_18_Update.zip \
               --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
               --title 'Cazy Studio v0.3.18 — Rapid Start Challenge OCR Fix' \
-              --notes 'Fixes Spiral Abyss AutoDirector missing brief Start Challenge HUD prompts during a Full Run scan. Increases video frame sampling to approximately eight frames per second, adds a fast localized English OCR pass while waiting for the next chamber-side start, alternates grayscale and thresholded crops, and preserves the slower general OCR for side switches, completion and failures. Keeps 2-second pre-roll on each start, manual review, combined one-video export, previous RIFE-v4 compatibility fix, saved Quality Lab recipes and silent Windows OCR processes. Tested with short prompt appearances on both sides of two synthetic chambers and existing OCR, updater, RIFE and GUI regression tests. Accuracy on the user's full original OBS video is not yet verified.'
+              --notes 'Fixes Spiral Abyss AutoDirector missing brief Start Challenge HUD prompts during a Full Run scan. Increases video frame sampling to approximately eight frames per second, adds a fast localized English OCR pass while waiting for the next chamber-side start, alternates grayscale and thresholded crops, and preserves the slower general OCR for side switches, completion and failures. Keeps 2-second pre-roll on each start, manual review, combined one-video export, previous RIFE-v4 compatibility fix, saved Quality Lab recipes and silent Windows OCR processes. Tested with short prompt appearances on both sides of two synthetic chambers and existing OCR, updater, RIFE and GUI regression tests. Accuracy on the original full OBS recording remains to be verified.'
           fi
           gh release edit v0.3.18 --repo "$GITHUB_REPOSITORY" --latest
       - uses: actions/upload-artifact@v4
