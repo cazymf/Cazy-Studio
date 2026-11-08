@@ -37,6 +37,7 @@ def fake_render(path,target,opts,status,cancel,sample,root,progress):
 
 namespace={
     'tk':tk,'ttk':ttk,'os':os,'Path':Path,'threading':threading,
+    '__file__':str(ROOT/'source'/'quality_ui.py'),
     'CARD':CARD,'CARD2':CARD2,'TEXT':TEXT,'MUTED':MUTED,
     'ACCENT':ACCENT,'ACCENT2':ACCENT2,'GREEN':GREEN,
     'filedialog':types.SimpleNamespace(asksaveasfilename=lambda **kw:
