@@ -33,6 +33,10 @@ class QualityLab(tk.Toplevel):
         self.compare_imgs=[]
         self.compare_tk=None
         self.last_export=None
+        self.render_window=None
+        self.render_popup_title=tk.StringVar(value='0.0%  •  Preparing')
+        self.render_popup_stage=tk.StringVar(value='Waiting for the rendering pipeline…')
+        self.render_popup_progress=tk.DoubleVar(value=0.)
         self.vars={}
         self._suspend_autosave=True
         self._autosave_task=None
@@ -177,6 +181,7 @@ class QualityLab(tk.Toplevel):
         self.status=tk.StringVar(value='Choose a video. Quality Lab never changes your original source.')
         self.label(foot,'PROCESS STATUS',ACCENT2,9,True).pack(anchor='w')
         tk.Label(foot,textvariable=self.status,fg=TEXT,bg=BG,anchor='w',justify='left',wraplength=790).pack(side='left',fill='x',expand=True,pady=(3,0))
+        self.button(foot,'Show Render Window',self._show_render_window).pack(side='right',padx=(9,0))
         self.button(foot,'Cancel Job',self.cancel_job).pack(side='right',padx=(9,0))
         self.progress_title=tk.StringVar(value='0%  •  Ready')
         self.label(foot,'RENDER PROGRESS  •  Live processing FPS + ETA',ACCENT2,9,True).pack(anchor='w',pady=(9,0))
@@ -451,6 +456,67 @@ class QualityLab(tk.Toplevel):
             except Exception as exc:self.jobs.put(('error',str(exc)))
         threading.Thread(target=work,daemon=True).start()
 
+    def _show_render_window(self):
+        """A dedicated, reusable window keeps progress visible above Quality Lab."""
+        if self.render_window is not None:
+            try:
+                if self.render_window.winfo_exists():
+                    self.render_window.deiconify()
+                    self.render_window.lift()
+                    self.render_window.focus_set()
+                    return
+            except tk.TclError:
+                pass
+        win=tk.Toplevel(self)
+        self.render_window=win
+        win.title('Cazy Studio • Live Render Progress')
+        win.geometry('620x245')
+        win.minsize(480,220)
+        win.configure(bg=CARD)
+        win.transient(self)
+        # Closing hides progress; it does not kill hours of work.
+        win.protocol('WM_DELETE_WINDOW',win.withdraw)
+        panel=tk.Frame(win,bg=CARD,padx=19,pady=18)
+        panel.pack(fill='both',expand=True)
+        self.label(panel,'QUALITY LAB  •  RENDERING',ACCENT2,13,True).pack(
+            anchor='w',pady=(0,12))
+        tk.Label(panel,textvariable=self.render_popup_title,bg=CARD,fg=GREEN,
+                 font=('Segoe UI',14,'bold'),anchor='w').pack(fill='x')
+        bar=ttk.Progressbar(panel,orient='horizontal',mode='determinate',
+                            maximum=100,variable=self.render_popup_progress)
+        bar.pack(fill='x',pady=(12,10),ipady=4)
+        tk.Label(panel,textvariable=self.render_popup_stage,bg=CARD,fg=TEXT,
+                 font=('Segoe UI',10),anchor='w',justify='left',
+                 wraplength=555).pack(fill='x',pady=(0,12))
+        controls=tk.Frame(panel,bg=CARD)
+        controls.pack(fill='x')
+        self.render_popup_cancel=self.button(controls,'Cancel Render',self.cancel_job)
+        self.render_popup_cancel.pack(side='right')
+        self.button(controls,'Hide Window',win.withdraw).pack(side='right',padx=(0,8))
+        win.lift()
+        win.focus_set()
+        # Work around Windows placing transient export windows behind the app.
+        if os.name=='nt':
+            win.attributes('-topmost',True)
+            win.after(450,lambda:win.attributes('-topmost',False)
+                      if win.winfo_exists() else None)
+
+    def _finish_render_window(self,description,successful=False):
+        if self.render_window is None:
+            return
+        try:
+            if not self.render_window.winfo_exists():
+                return
+            if successful:
+                self.render_popup_progress.set(100.)
+                self.render_popup_title.set('100.0%  •  Render complete')
+            else:
+                self.render_popup_title.set('RENDER STOPPED')
+            self.render_popup_stage.set(description)
+            self.render_popup_cancel.configure(state='disabled')
+        except tk.TclError:
+            pass
+
     def export(self,sample=False):
         if not self.path or self.busy:return
         try:opts=self._collect()
@@ -462,6 +528,11 @@ class QualityLab(tk.Toplevel):
         self.busy=True;self.cancel.clear();self.status.set('Preparing enhancement pipeline…')
         self.progress_bar['value']=0
         self.progress_title.set('0%  •  Preparing')
+        self.render_popup_progress.set(0.)
+        self.render_popup_title.set('0.0%  •  Preparing')
+        self.render_popup_stage.set('Starting the Quality Lab rendering pipeline…')
+        self._show_render_window()
+        self.render_popup_cancel.configure(state='normal')
         def work():
             try:
                 result=quality.render_quality(self.path,target,opts,
@@ -473,7 +544,10 @@ class QualityLab(tk.Toplevel):
         threading.Thread(target=work,daemon=True).start()
 
     def cancel_job(self):
-        if self.busy:self.cancel.set();self.status.set('Cancelling current job…')
+        if self.busy:
+            self.cancel.set()
+            self.status.set('Cancelling current job…')
+            self.render_popup_stage.set('Cancelling render…')
 
     def open_last(self):
         if not self.last_export or not Path(self.last_export).is_file():
@@ -506,9 +580,13 @@ class QualityLab(tk.Toplevel):
                 if m[0]=='status':self.status.set(m[1])
                 elif m[0]=='render_progress':
                     pct,stage,done,total=m[1:]
+                    pct=max(0.,min(100.,float(pct)))
                     self.progress_bar['value']=pct
                     detail=f'  •  {done:,}/{total:,} frames' if done is not None and total is not None else ''
                     self.progress_title.set(f'{pct:.1f}%  •  {stage}{detail}')
+                    self.render_popup_progress.set(pct)
+                    self.render_popup_title.set(f'{pct:.1f}%  •  Rendering')
+                    self.render_popup_stage.set(f'{stage}{detail}')
                 elif m[0]=='compare':
                     self.compare_imgs=[Image.open(m[1]).convert('RGB'),Image.open(m[2]).convert('RGB')]
                     self._paint_compare();self.busy=False;self.status.set('A/B frame generated. Slide the divider; AI and temporal effects are not included in this still.')
@@ -517,9 +595,13 @@ class QualityLab(tk.Toplevel):
                     self.progress_bar['value']=100
                     self.progress_title.set('100%  •  Complete')
                     self.status.set('Export complete: '+m[1])
+                    self._finish_render_window('Saved MP4: '+m[1],successful=True)
                     messagebox.showinfo('Cazy Quality Lab','Enhanced MP4 saved:\n'+m[1],parent=self)
                 elif m[0]=='error':
-                    self.busy=False;self.status.set('Failed: '+m[1][-350:]);messagebox.showerror('Quality Lab',m[1][-1900:],parent=self)
+                    self.busy=False
+                    self.status.set('Failed: '+m[1][-350:])
+                    self._finish_render_window('Error: '+m[1][-850:])
+                    messagebox.showerror('Quality Lab',m[1][-1900:],parent=self)
         except queue.Empty:pass
         try:self._poll_after=self.after(120,self._poll)
         except tk.TclError:pass
