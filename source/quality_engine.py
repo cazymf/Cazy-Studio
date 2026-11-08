@@ -712,6 +712,10 @@ def render_quality(path: str, output: str, opts: QualitySettings, status: Callab
     root=root or str(Path(__file__).resolve().parent)
     upscale=opts.upscale!='Lanczos'
     use_rife=(opts.frame_method=='RIFE AI' and fps>info.fps+.5)
+    if opts.frame_method=='Optical Flow' and fps>info.fps+.5 and status:
+        status(f'Actual setting: CPU Optical Flow interpolation '
+               f'{info.fps:g} → {fps} FPS; choose RIFE AI in Quality Lab '
+               'if you want GPU-based frame interpolation.')
     if upscale and use_rife:
         stages={'extract':(0,10),'rife':(10,38),'upscale':(38,88),'encode':(88,99.5)}
     elif upscale:
@@ -1936,9 +1940,20 @@ def render_full_run(segments,destination,preset_name,music="",progress=None,
             opts=base.clone()
             opts.start=seg["start"]
             opts.duration=seg["end"]-seg["start"]
+            # Report the ACTUAL loaded preset and output FPS. A selected name
+            # must not disguise an Optical Flow / RIFE or FPS mismatch.
+            if progress:
+                progress(index*85/len(cuts),
+                         f'Half {index+1}/{len(cuts)} — loaded '
+                         f'{preset_name or "last used"}: {opts.fps or "Source"} FPS, '
+                         f'{opts.frame_method}, {opts.encoder}')
             # Existing per-source audio remains audible. Silent clips receive
             # an AAC silent stream for uniform concat compatibility.
             quality.render_quality(seg["path"],str(target),opts,cancel=cancel,
+                status=(lambda text,j=index:
+                        progress(j*85/len(cuts),
+                                 f"Half {j+1}/{len(cuts)}: {text}")
+                        if progress else None),
                 progress=(lambda pct,stage,done,total,j=index:
                           progress((j+max(0,min(100,pct))/100)*85/len(cuts),
                                    f"Half {j+1}/{len(cuts)}: {stage}") if progress else None))
