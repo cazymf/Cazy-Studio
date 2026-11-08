@@ -4,6 +4,7 @@ Open source Python/Tk UI; FFmpeg rendering lives in engine.py.
 from __future__ import annotations
 import copy
 import json
+import hashlib
 import random
 import tempfile
 import os
@@ -1021,6 +1022,91 @@ def _autodirector_path():
     return (Path(local) / 'CazyStudio' if local else Path.home() / '.cazy_studio') / 'autodirector_queue.json'
 
 
+def _autodirector_scan_cache_path(paths):
+    """One cached review per ordered set of selected OBS recordings."""
+    if not paths:
+        raise ValueError('Select recordings before opening saved cuts')
+    canonical=[os.path.normcase(os.path.abspath(str(p))) for p in paths]
+    digest=hashlib.sha256(json.dumps(canonical,ensure_ascii=False).encode('utf-8')).hexdigest()[:24]
+    return _autodirector_path().parent/'scan_cache'/('fullrun_'+digest+'.json')
+
+
+def _autodirector_source_fingerprint(paths):
+    """Reject stale timestamps when any source recording has been replaced."""
+    result=[]
+    for name in paths:
+        p=Path(name)
+        st=p.stat()
+        result.append({'path':os.path.normcase(os.path.abspath(str(p))),
+                       'size':st.st_size,'mtime_ns':st.st_mtime_ns})
+    return result
+
+
+def _autodirector_save_scan_cache(result, paths):
+    """Persist OCR events and reviewer edits without touching source videos."""
+    paths=list(paths)
+    fingerprint=_autodirector_source_fingerprint(paths)
+    if not isinstance(result,dict) or not isinstance(result.get('segments'),list):
+        raise ValueError('Full Run data is incomplete')
+    if len(result['segments'])>autodirector_fullrun.SEGMENT_MAX:
+        raise ValueError('Too many saved cut segments')
+    allowed={item['path'] for item in fingerprint}
+    for segment in result['segments']:
+        if (not isinstance(segment,dict) or
+                os.path.normcase(os.path.abspath(str(segment.get('path','')))) not in allowed):
+            raise ValueError('Saved cuts include an unselected recording')
+    location=_autodirector_scan_cache_path(paths)
+    location.parent.mkdir(parents=True,exist_ok=True)
+    document={'schema':1,'source_fingerprint':fingerprint,
+              'result':result}
+    fd,tempname=tempfile.mkstemp(prefix='fullrun_',suffix='.tmp',dir=location.parent)
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as output:
+            json.dump(document,output,indent=2,ensure_ascii=False,allow_nan=False)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(tempname,location)
+    finally:
+        if os.path.exists(tempname):
+            os.unlink(tempname)
+    return location
+
+
+def _autodirector_load_scan_cache(paths):
+    """Load the cached review only for the same, unmodified source files."""
+    paths=list(paths)
+    location=_autodirector_scan_cache_path(paths)
+    if not location.is_file():
+        raise FileNotFoundError('No saved Full Run scan for these recordings. Scan once first.')
+    if location.stat().st_size>8_000_000:
+        raise ValueError('Saved scan exceeds the allowed size. Scan again.')
+    try:
+        document=json.loads(location.read_text(encoding='utf-8'))
+    except (OSError,ValueError) as exc:
+        raise ValueError('Saved scan could not be opened: '+str(exc)) from exc
+    if not isinstance(document,dict) or document.get('schema')!=1:
+        raise ValueError('Saved scan has an unsupported format. Scan again.')
+    try:
+        fresh=_autodirector_source_fingerprint(paths)
+    except OSError as exc:
+        raise ValueError('Source recording is missing. Restore it to reuse saved cuts.') from exc
+    if document.get('source_fingerprint')!=fresh:
+        raise ValueError('Source recording changed since the scan. Scan again to refresh the cuts.')
+    result=document.get('result')
+    if not isinstance(result,dict) or not isinstance(result.get('segments'),list):
+        raise ValueError('Saved cut data is incomplete. Scan again.')
+    if len(result['segments'])>autodirector_fullrun.SEGMENT_MAX:
+        raise ValueError('Saved cut data is oversized. Scan again.')
+    allowed={item['path'] for item in fresh}
+    for segment in result['segments']:
+        if (not isinstance(segment,dict) or
+                os.path.normcase(os.path.abspath(str(segment.get('path','')))) not in allowed):
+            raise ValueError('Saved cuts reference a recording outside the selected queue.')
+    if not isinstance(result.get('reports'),list):
+        raise ValueError('Saved scan report is incomplete. Scan again.')
+    return result
+
+
 def _autodirector_defaults():
     return {
         'schema': 1, 'queue': [], 'music_folder': '', 'random_music': True,
@@ -1155,6 +1241,7 @@ class AutoDirectorView(tk.Frame):
         self.preset_var = tk.StringVar(value=self.state.get('render_preset', ''))
         self.ocr_var = tk.StringVar(value=self.state.get('ocr_path',''))
         self._full_run_result = None
+        self._active_review_signature = None
         self._auto_busy = False
         self._auto_messages = queue.Queue()
         self._auto_cancel = threading.Event()
@@ -1170,6 +1257,7 @@ class AutoDirectorView(tk.Frame):
         self.detail_var = tk.StringVar(value='Select a recording to see its location and preview it.')
         self._make_view()
         self.refresh()
+        self._show_saved_scan_status()
         self.after(120, self._poll_auto_messages)
 
     def _label(self, parent, text, size=10, color=TEXT, bold=False):
@@ -1283,7 +1371,8 @@ class AutoDirectorView(tk.Frame):
         bottom.pack(fill='x', padx=14, pady=(0, 14))
         self._label(bottom, 'OCR triggers + 2-second pre-roll for each half',
                     9, MUTED).pack(side='left', pady=8)
-        self._button(bottom, 'SCAN / REVIEW RUN', self.scan_selected, True).pack(side='right')
+        self._button(bottom, 'SCAN AGAIN (OCR)', self.scan_selected).pack(side='right')
+        self._button(bottom, 'REVIEW SAVED CUTS', self.reopen_saved_full_run, True).pack(side='right',padx=(0,7))
         self._button(bottom, 'Assign Music', self.prepare).pack(side='right', padx=(0, 7))
         self._button(bottom, 'Cancel Job', self.cancel_full_run_job).pack(side='right', padx=(0, 7))
         self._button(bottom, 'Error Log', self.open_last_render_error).pack(side='right', padx=(0, 7))
@@ -1690,9 +1779,14 @@ class AutoDirectorView(tk.Frame):
                         f'Completed {counts.get("complete",0)}  •  '
                         f'Failed {counts.get("failure",0)}')
                     self._full_run_result = data
+                    try:
+                        _autodirector_save_scan_cache(data,self._current_scan_paths())
+                        saved=' Auto-saved; reopen with REVIEW SAVED CUTS.'
+                    except (ValueError,OSError,TypeError) as exc:
+                        saved=' Could not save scan: '+str(exc)
                     self.status_var.set(
                         f'Found {data["completed_chambers"]} completed chambers / '
-                        f'{len(data["segments"])} halves. Review before ONE-video export.')
+                        f'{len(data["segments"])} halves.'+saved)
                     self.review_full_run(data)
                 elif event == 'render_progress':
                     pct, step = data
@@ -1953,6 +2047,51 @@ class AutoDirectorView(tk.Frame):
         self.refresh()
         self.status_var.set('Local text recognition selected: '+self.ocr_var.get())
 
+    def _current_scan_paths(self):
+        return [job['path'] for job in self.state['queue']]
+
+    def _show_saved_scan_status(self):
+        """Show the reusable scan immediately on startup, without launching OCR."""
+        if self.mode_var.get()!='Full Run' or not self.state['queue']:
+            return
+        try:
+            result=_autodirector_load_scan_cache(self._current_scan_paths())
+        except (FileNotFoundError,ValueError,OSError):
+            return
+        self._full_run_result=result
+        self.scan_progress_var.set(100.)
+        self.scan_state_var.set('SAVED SCAN READY — no OCR needed')
+        self.scan_detail_var.set(
+            f'{result.get("completed_chambers",0)} completed chambers • '
+            f'{len(result["segments"])} saved half-clips. '
+            'Click REVIEW SAVED CUTS to edit or render.')
+
+    def reopen_saved_full_run(self):
+        """Review existing timestamps after render failure or app restart."""
+        if self._auto_busy:
+            messagebox.showinfo('AutoDirector busy',
+                                'Finish or cancel the current job before reviewing saved cuts.',
+                                parent=self)
+            return
+        if self.mode_var.get()!='Full Run':
+            messagebox.showinfo('Saved cuts','Switch the Editing Plan to Full Run.',
+                                parent=self)
+            return
+        try:
+            result=_autodirector_load_scan_cache(self._current_scan_paths())
+        except (FileNotFoundError,ValueError,OSError) as exc:
+            messagebox.showinfo('Saved Full Run',str(exc),parent=self)
+            return
+        self._full_run_result=result
+        self.scan_state_var.set('SAVED SCAN READY — no OCR needed')
+        self.scan_detail_var.set(
+            f'{result.get("completed_chambers",0)} chambers, '
+            f'{len(result["segments"])} saved half-clips. '
+            'Review, adjust or render without scanning.')
+        self.scan_progress_var.set(100.)
+        self.review_full_run(result)
+
+
     def scan_entire_full_run(self):
         if self._auto_busy:
             messagebox.showinfo('AutoDirector busy','Another scan/render is running.',parent=self)
@@ -2089,6 +2228,25 @@ class AutoDirectorView(tk.Frame):
             table.column(field,width=width,anchor='w')
         table.pack(fill='both',expand=True)
         segments=[dict(seg) for seg in result['segments']]
+        # Preserve the exact reviewed source versions; do not write stale
+        # timestamps as though they belonged to a replaced OBS recording.
+        review_paths=[job['path'] for job in self.state['queue']]
+        try:
+            review_fingerprint=_autodirector_source_fingerprint(review_paths)
+        except OSError:
+            review_fingerprint=None
+        def persist_review():
+            result['segments']=[dict(seg) for seg in segments]
+            self._full_run_result=result
+            try:
+                if (review_fingerprint is None or
+                        _autodirector_source_fingerprint(review_paths)!=review_fingerprint):
+                    raise ValueError('Original recording changed. Rescan before saving these cuts.')
+                _autodirector_save_scan_cache(result,review_paths)
+            except (OSError,ValueError,TypeError) as exc:
+                self.status_var.set('Could not save reviewed cuts: '+str(exc))
+                return False
+            return True
         for i,seg in enumerate(segments):
             table.insert('',tk.END,iid=str(i),values=(
                 'YES' if seg.get('enabled',True) else 'NO',
@@ -2134,7 +2292,7 @@ class AutoDirectorView(tk.Frame):
                 segments[i]['start']=a
                 segments[i]['end']=b
                 update_row(i)
-                return True
+                return persist_review()
             except ValueError as exc:
                 messagebox.showerror('Invalid cut',str(exc),parent=win)
                 return False
@@ -2143,6 +2301,7 @@ class AutoDirectorView(tk.Frame):
             if i is None:return
             segments[i]['enabled']=not segments[i].get('enabled',True)
             update_row(i)
+            persist_review()
         def preview():
             i=selected_index()
             if i is not None:self._open_auto_source(segments[i]['path'])
@@ -2186,6 +2345,7 @@ class AutoDirectorView(tk.Frame):
                     update_row(i)
                     table.selection_set(str(i))
                     choose()
+                    persist_review()
                     dialog.destroy()
                 except (ValueError,IndexError) as exc:
                     messagebox.showerror('Manual half',str(exc),parent=dialog)
@@ -2195,6 +2355,9 @@ class AutoDirectorView(tk.Frame):
             if i is not None and start.get() and end.get():
                 if not apply_times():
                     return
+            if not persist_review():
+                messagebox.showerror('Saved cuts','Could not save the reviewed cuts. Check the status and recording paths.',parent=win)
+                return
             try:
                 accepted=autodirector_fullrun.validate_full_run_segments(segments)
                 prefs=quality_engine.load_preferences()
