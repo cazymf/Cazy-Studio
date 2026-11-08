@@ -82,7 +82,7 @@ class RifeModelCompatibilityTests(unittest.TestCase):
             exe = self._exe(folder)
             with self.assertRaisesRegex(RuntimeError, "RIFE v4.*Install or repair"):
                 q._rife_interpolation_command(
-                    exe, "input", "output", 40, 60, 120.5)
+                    exe, "input", "output", 40, 60, 180)
 
     def test_still_uses_rife_for_full_run_workflow(self):
         from inspect import getsource
