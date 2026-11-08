@@ -124,6 +124,7 @@ with tempfile.TemporaryDirectory() as temp:
         view._review_window.destroy()
         # A previously scanned run is reusable after the dialog closes.
         ns['_autodirector_save_scan_cache'](full_run,[str(recording)])
+        view.mode_var.set('Full Run')
         view.reopen_saved_full_run()
         window.update_idletasks()
         assert view._review_window.winfo_exists()
