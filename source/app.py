@@ -8,6 +8,7 @@ import random
 import tempfile
 import os
 import queue
+import traceback
 import subprocess
 import threading
 import time
@@ -1285,6 +1286,7 @@ class AutoDirectorView(tk.Frame):
         self._button(bottom, 'SCAN / REVIEW RUN', self.scan_selected, True).pack(side='right')
         self._button(bottom, 'Assign Music', self.prepare).pack(side='right', padx=(0, 7))
         self._button(bottom, 'Cancel Job', self.cancel_full_run_job).pack(side='right', padx=(0, 7))
+        self._button(bottom, 'Error Log', self.open_last_render_error).pack(side='right', padx=(0, 7))
 
         self._label(options, '2  EDITING PLAN', 13, ACCENT2, True).pack(
             anchor='w', padx=15, pady=(16, 5))
@@ -1620,6 +1622,35 @@ class AutoDirectorView(tk.Frame):
         self.scan_detail_var.set(description)
         self.status_var.set('Local rendering: 0% — ' + description)
 
+    def _auto_error_text(self, exc):
+        """Always retain a useful error message even if a program exits silently."""
+        description=str(exc).strip() or f'{type(exc).__name__} (no error message)'
+        if 'Error log:' not in description:
+            saved=quality_engine._save_cazy_render_error(
+                f'AutoDirector {type(exc).__name__}: {description}',
+                traceback_text=traceback.format_exc())
+            if saved:
+                description+='\n\nError log: '+saved
+        return description
+
+    def open_last_render_error(self):
+        """The log survives after a Windows error popup is dismissed."""
+        path=quality_engine._cazy_render_error_log_path()
+        if not path.is_file():
+            messagebox.showinfo('AutoDirector error log',
+                                'No local render error has been recorded yet.',
+                                parent=self)
+            return
+        try:
+            if os.name=='nt':
+                os.startfile(str(path))
+            else:
+                subprocess.Popen(['xdg-open',str(path)])
+        except OSError as exc:
+            messagebox.showerror('AutoDirector error log',
+                                 f'Could not open the log: {exc}\n{path}',
+                                 parent=self)
+
     def _poll_auto_messages(self):
         try:
             while True:
@@ -1816,7 +1847,7 @@ class AutoDirectorView(tk.Frame):
                     progress=lambda pct,label: self._auto_messages.put(('render_progress',(pct,label))))
                 self._auto_messages.put(('render_done',output))
             except Exception as exc:
-                self._auto_messages.put(('error',str(exc)))
+                self._auto_messages.put(('error',self._auto_error_text(exc)))
         threading.Thread(target=background,daemon=True).start()
         if self._review_window is not None and self._review_window.winfo_exists():
             self._review_window.destroy()
@@ -1964,7 +1995,7 @@ class AutoDirectorView(tk.Frame):
                     detail=lambda info:self._auto_messages.put(('scan_detail',info)))
                 self._auto_messages.put(('fullrun_done',result))
             except Exception as exc:
-                self._auto_messages.put(('error',str(exc)))
+                self._auto_messages.put(('error',self._auto_error_text(exc)))
         threading.Thread(target=work,daemon=True).start()
 
     def show_detection_report(self,result):
@@ -2197,7 +2228,7 @@ class AutoDirectorView(tk.Frame):
                         self._auto_messages.put(('render_progress',(pct,label))))
                     self._auto_messages.put(('render_done',output))
                 except Exception as exc:
-                    self._auto_messages.put(('error',str(exc)))
+                    self._auto_messages.put(('error',self._auto_error_text(exc)))
             threading.Thread(target=work,daemon=True).start()
             win.destroy()
         buttons=tk.Frame(body,bg=BG)
