@@ -46,7 +46,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title('Cazy Studio v0.3.21  |  Error Log Diagnostics')
+        self.title('Cazy Studio v0.3.22  |  Saved Full Run Cuts')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
@@ -156,7 +156,7 @@ class Studio(tk.Tk):
         toolbar.pack_propagate(False)
         tk.Label(toolbar,text='CAZY',bg=BG,fg=ACCENT,font=('Segoe UI',22,'bold')).pack(side='left')
         tk.Label(toolbar,text='STUDIO',bg=BG,fg=TEXT,font=('Segoe UI',22,'bold')).pack(side='left',padx=(5,22))
-        tk.Label(toolbar,text='v0.3.21',bg=BG,fg=MUTED,font=('Segoe UI',9)).pack(side='left',padx=(0,12))
+        tk.Label(toolbar,text='v0.3.22',bg=BG,fg=MUTED,font=('Segoe UI',9)).pack(side='left',padx=(0,12))
         self._button(toolbar,'EDITOR',self.show_editor,small=True).pack(side='left',padx=(0,5))
         self._button(toolbar,'✦ AUTODIRECTOR',self.open_autodirector,True,small=True).pack(side='left')
         self._button(toolbar,'Export MP4  ↗',self.export_dialog).pack(side='right',padx=(8,0))
