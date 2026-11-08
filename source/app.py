@@ -947,17 +947,25 @@ class Studio(tk.Tk):
         self.playing=False
         self.play_btn.configure(text='▶  Play')
         self.export_window=tk.Toplevel(self)
-        self.export_window.title('Rendering Cazy Studio Project')
-        self.export_window.geometry('510x180')
+        self.export_window.title('Rendering Cazy Studio Project  •  0%')
+        self.export_window.geometry('570x210')
         self.export_window.configure(bg=CARD)
         self.export_window.transient(self)
         self.export_window.protocol('WM_DELETE_WINDOW',self.cancel_export)
         self._label(self.export_window,'RENDER IN PROGRESS',13,ACCENT2,True).pack(anchor='w',padx=20,pady=(19,10))
-        self.export_message=self._label(self.export_window,'Preparing...',10,TEXT)
+        self.export_message=self._label(self.export_window,'Preparing render…  0.0%',10,TEXT)
         self.export_message.pack(anchor='w',padx=20)
         self.export_bar=ttk.Progressbar(self.export_window,orient='horizontal',maximum=100,style='Cazy.Horizontal.TProgressbar')
         self.export_bar.pack(fill='x',padx=20,pady=(16,8))
         self._button(self.export_window,'Cancel',self.cancel_export,small=True).pack(anchor='e',padx=20)
+        self.status_var.set('Rendering editor video — 0.0%')
+        self.export_window.lift()
+        self.export_window.focus_set()
+        if os.name=='nt':
+            self.export_window.attributes('-topmost',True)
+            self.export_window.after(450,
+                lambda: self.export_window.attributes('-topmost',False)
+                if self.export_window.winfo_exists() else None)
         render_project=copy.deepcopy(self.project)
         def worker():
             try:
@@ -978,8 +986,11 @@ class Studio(tk.Tk):
                 if msg[0]=='progress':
                     _,desc,pct=msg
                     if self.exporting:
-                        self.export_message.config(text=desc[:65]);self.export_bar['value']=pct
-                        self.status_var.set(desc)
+                        pct=max(0.,min(100.,float(pct)))
+                        self.export_message.config(text=f'{pct:.1f}%  •  {desc[:65]}')
+                        self.export_window.title(f'Rendering Cazy Studio Project  •  {pct:.1f}%')
+                        self.export_bar['value']=pct
+                        self.status_var.set(f'Exporting: {pct:.1f}% — {desc}')
                 elif msg[0] in ('done','error'):
                     self.exporting=False
                     if self.export_window.winfo_exists():self.export_window.destroy()
