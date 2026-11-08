@@ -1165,6 +1165,7 @@ class AutoDirectorView(tk.Frame):
         self._scan_started = None
         self._scan_last_update = None
         self._scan_last_fraction = 0.0
+        self._render_started = None
         self.detail_var = tk.StringVar(value='Select a recording to see its location and preview it.')
         self._make_view()
         self.refresh()
@@ -1611,6 +1612,14 @@ class AutoDirectorView(tk.Frame):
             'Select Full Run to cut both halves and join every completed chamber.',
             parent=self)
 
+    def _begin_auto_render(self, description):
+        """Make render status visible in the scan/render panel before the first frame."""
+        self._render_started = time.monotonic()
+        self.scan_progress_var.set(0.)
+        self.scan_state_var.set('RENDERING — 0.0%')
+        self.scan_detail_var.set(description)
+        self.status_var.set('Local rendering: 0% — ' + description)
+
     def _poll_auto_messages(self):
         try:
             while True:
@@ -1656,9 +1665,18 @@ class AutoDirectorView(tk.Frame):
                     self.review_full_run(data)
                 elif event == 'render_progress':
                     pct, step = data
+                    pct = max(0., min(100., float(pct)))
+                    self.scan_progress_var.set(max(pct, self.scan_progress_var.get()))
+                    elapsed = max(0., time.monotonic() - (self._render_started or time.monotonic()))
+                    clock = f'{int(elapsed // 60):02d}:{int(elapsed % 60):02d}'
+                    self.scan_state_var.set(f'RENDERING — {pct:.1f}%  |  Elapsed {clock}')
+                    self.scan_detail_var.set(f'Current stage: {step}')
                     self.status_var.set(f'Local rendering: {pct:.0f}% — {step}')
                 elif event == 'render_done':
                     self._auto_busy = False
+                    self.scan_progress_var.set(100.)
+                    self.scan_state_var.set('RENDER COMPLETE — 100%')
+                    self.scan_detail_var.set('Finished video: ' + data['video'])
                     self.status_var.set('Finished: ' + data['video'])
                     messagebox.showinfo('AutoDirector finished',
                         'Your local package is ready:\n\n' + '\n'.join(data.values()) +
@@ -1787,6 +1805,8 @@ class AutoDirectorView(tk.Frame):
         matched_time = (result['candidates'][int(selection[0])]['at']
                         if selection else None)
         self._auto_busy = True
+        self._auto_cancel.clear()
+        self._begin_auto_render('Preparing reviewed segment with Quality Lab preset…')
         def background():
             try:
                 output = quality_engine.cazy_render_local_package(
@@ -2166,6 +2186,9 @@ class AutoDirectorView(tk.Frame):
                         if j.get('music')), '')
             self._auto_busy=True
             self._auto_cancel.clear()
+            self._begin_auto_render(
+                f'Preparing {len(accepted)} reviewed halves with preset: '
+                f'{preset or "Use last-used settings"}')
             def work():
                 try:
                     output=autodirector_fullrun.render_full_run(
