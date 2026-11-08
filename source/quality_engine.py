@@ -537,6 +537,154 @@ class RenderSpeedMeter:
         return f'  •  {rate:.1f} FPS  •  ETA {eta}'
 
 
+
+# Pinned January 2025 imageio-ffmpeg Windows wheel, shipping FFmpeg 7.1.
+# This older build predates NVENC API 13.1 and can work with driver 581.80.
+# Its wheel SHA-256 is taken from PyPI's imageio-ffmpeg 0.6.0 release.
+_LEGACY_FFMPEG_WHEEL_URL = (
+    "https://files.pythonhosted.org/packages/2c/c6/"
+    "fa760e12a2483469e2bf5058c5faff664acf66cadb4df2ad6205b016a73d/"
+    "imageio_ffmpeg-0.6.0-py3-none-win_amd64.whl"
+)
+_LEGACY_FFMPEG_WHEEL_SHA256 = (
+    "02fa47c83703c37df6bfe4896aab339013f62bf02c5ebf2dce6da56af04ffc0a"
+)
+_LEGACY_FFMPEG_FILENAME = "ffmpeg-win-x86_64-v7.1.exe"
+_NVENC_PROBE_CACHE = {}
+
+
+def _nvenc_codec(encoder):
+    return {
+        "Auto / NVIDIA NVENC": "h264_nvenc",
+        "HEVC / NVIDIA NVENC": "hevc_nvenc",
+        "AV1 / NVIDIA NVENC": "av1_nvenc",
+    }.get(encoder)
+
+
+def _probe_nvenc(ffmpeg, codec):
+    """Actually encode two tiny frames; listing encoders is insufficient."""
+    command = [
+        str(ffmpeg), "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=black:s=320x180:r=30",
+        "-frames:v", "2", "-an", "-c:v", codec, "-f", "null", "-"
+    ]
+    try:
+        run = subprocess.run(
+            command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL, timeout=18,
+            creationflags=_cazy_subprocess_flags())
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, str(exc)
+    error = run.stderr.decode("utf-8", "replace").strip()
+    return run.returncode == 0, error[-850:]
+
+
+def _legacy_ffmpeg_cache_path():
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / "CazyStudio" / "ffmpeg-compat" / _LEGACY_FFMPEG_FILENAME
+    return Path.home() / ".cazy_studio" / "ffmpeg-compat" / _LEGACY_FFMPEG_FILENAME
+
+
+def _ensure_legacy_ffmpeg(status=None, cancel=None):
+    """Install only one executable from a SHA256-verified PyPI wheel.
+
+    Does NOT change the system FFmpeg, installed pip packages or GPU driver.
+    Caches a private copy under the user's app-data directory.
+    """
+    import hashlib
+    import urllib.request
+    import zipfile
+    if os.name != "nt":
+        raise RuntimeError("Compatible FFmpeg auto-install is for Windows only")
+    executable = _legacy_ffmpeg_cache_path()
+    if executable.is_file() and executable.stat().st_size > 1_000_000:
+        return str(executable)
+    executable.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cazy_ffmpeg_compat_") as folder:
+        wheel = Path(folder) / "verified-ffmpeg.whl"
+        hasher = hashlib.sha256()
+        if status:
+            status("NVENC API mismatch detected — fetching compatible FFmpeg 7.1 (one time, ~31 MB)…")
+        with urllib.request.urlopen(_LEGACY_FFMPEG_WHEEL_URL, timeout=30) as response:
+            with wheel.open("wb") as output:
+                size = 0
+                while True:
+                    if cancel is not None and cancel.is_set():
+                        raise RuntimeError("Render cancelled")
+                    block = response.read(1024 * 1024)
+                    if not block:
+                        break
+                    size += len(block)
+                    if size > 40_000_000:
+                        raise RuntimeError("Compatible FFmpeg download exceeded expected size")
+                    hasher.update(block)
+                    output.write(block)
+                    if status:
+                        status(f"Downloading verified NVENC-compatible FFmpeg: {size/31_246_824*100:.0f}%")
+        if hasher.hexdigest() != _LEGACY_FFMPEG_WHEEL_SHA256:
+            raise RuntimeError("Compatible FFmpeg download checksum mismatch")
+        with zipfile.ZipFile(wheel) as bundle:
+            choices = [name for name in bundle.namelist()
+                       if name.endswith("/" + _LEGACY_FFMPEG_FILENAME)]
+            if len(choices) != 1:
+                raise RuntimeError("Compatible FFmpeg binary missing from verified wheel")
+            partial = executable.with_suffix(".exe.partial")
+            try:
+                with bundle.open(choices[0]) as reader, partial.open("wb") as output:
+                    shutil.copyfileobj(reader, output)
+                if partial.stat().st_size <= 1_000_000:
+                    raise RuntimeError("Compatible FFmpeg executable was empty")
+                partial.replace(executable)
+            finally:
+                partial.unlink(missing_ok=True)
+    if status:
+        status("Compatible FFmpeg 7.1 installed in Cazy Studio private app data.")
+    return str(executable)
+
+
+def _select_nvenc_ffmpeg(default_ffmpeg, encoder, status=None, cancel=None):
+    """Probe GPU encoding; use a checked older build if the NVENC API is newer.
+
+    Returns (executable, usable_nvenc, diagnostic). CPU fallback is explicit
+    and must not be mistaken for GPU rendering.
+    """
+    codec = _nvenc_codec(encoder)
+    if not codec:
+        return str(default_ffmpeg), False, "CPU x264 requested"
+    key = (str(default_ffmpeg), codec)
+    if key in _NVENC_PROBE_CACHE:
+        return _NVENC_PROBE_CACHE[key]
+    if status:
+        status(f"Checking actual NVIDIA {codec} hardware encoding…")
+    ok, message = _probe_nvenc(default_ffmpeg, codec)
+    if ok:
+        selected = (str(default_ffmpeg), True, "NVIDIA NVENC available")
+        _NVENC_PROBE_CACHE[key] = selected
+        return selected
+    reason = message or "GPU encoding probe failed"
+    compatible_markers = ("nvenc api version", "required nvenc api",
+                          "minimum required nvidia driver", "driver does not support")
+    if os.name == "nt" and any(marker in reason.lower() for marker in compatible_markers):
+        try:
+            old_ffmpeg = _ensure_legacy_ffmpeg(status=status, cancel=cancel)
+            ok, error = _probe_nvenc(old_ffmpeg, codec)
+            if ok:
+                selected = (old_ffmpeg, True, "Compatible NVENC via FFmpeg 7.1")
+                _NVENC_PROBE_CACHE[key] = selected
+                return selected
+            reason = "Compatible FFmpeg 7.1: " + (error or "NVENC probe failed")
+        except Exception as exc:
+            if cancel is not None and cancel.is_set():
+                raise
+            reason = "Compatible FFmpeg unavailable: " + str(exc)
+    if status:
+        status("NVIDIA encoding unavailable; CPU fallback. Reason: " + reason)
+    selected = (str(default_ffmpeg), False, reason)
+    _NVENC_PROBE_CACHE[key] = selected
+    return selected
+
+
 def render_quality(path: str, output: str, opts: QualitySettings, status: Callable[[str],None]|None=None,
                    cancel=None, sample=False, root: str|None=None,
                    progress: Callable[[float,str,int|None,int|None],None]|None=None) -> str:
@@ -553,6 +701,14 @@ def render_quality(path: str, output: str, opts: QualitySettings, status: Callab
     output=os.path.abspath(output)
     Path(output).parent.mkdir(parents=True,exist_ok=True)
     ff=engine.get_ffmpeg()
+    use_hardware=True
+    encoder_note=''
+    if _nvenc_codec(opts.encoder):
+        ff,use_hardware,encoder_note=_select_nvenc_ffmpeg(
+            ff,opts.encoder,status=status,cancel=cancel)
+    else:
+        use_hardware=False
+        encoder_note="CPU x264 selected in the saved preset"
     root=root or str(Path(__file__).resolve().parent)
     upscale=opts.upscale!='Lanczos'
     use_rife=(opts.frame_method=='RIFE AI' and fps>info.fps+.5)
@@ -567,7 +723,8 @@ def render_quality(path: str, output: str, opts: QualitySettings, status: Callab
     stage_labels={'extract':'Extracting trimmed frames',
                   'rife':'RIFE AI interpolation',
                   'upscale':'Real-ESRGAN upscaling',
-                  'encode':'Encoding final MP4'}
+                  'encode':('Encoding MP4: NVIDIA NVENC' if use_hardware
+                            else 'Encoding MP4: CPU (NVENC unavailable/disabled)')}
     last_pct=[0.0]
     speed_meter=RenderSpeedMeter()
     def report(stage,fraction,done=None,total=None):
@@ -579,9 +736,13 @@ def render_quality(path: str, output: str, opts: QualitySettings, status: Callab
     if progress:report(next(iter(stages)),0)
     with tempfile.TemporaryDirectory(prefix='cazy_quality_', dir=opts.scratch_dir or None) as td:
         ai_seq=_run_ai_sequence(path,info,opts,w,h,fps,dur,td,root,status,cancel,report)
-        for software in (False,True):
-            if software and opts.encoder=='CPU x264':break
-            if status:status('Encoding MP4 using '+('software encoder' if software or opts.encoder=='CPU x264' else opts.encoder)+'…')
+        for software in ((False,True) if use_hardware else (True,)):
+            if status:
+                detail=('NVIDIA NVENC' if not software else
+                        'CPU software encoder; '+encoder_note)
+                status('Encoding MP4 using '+detail+'…')
+            stage_labels['encode']=('Encoding MP4: NVIDIA NVENC' if not software
+                                    else 'Encoding MP4: CPU software')
             cmd=[ff,'-hide_banner','-loglevel','error','-y']
             if ai_seq:
                 pattern, sequence_fps, start_index=ai_seq
@@ -621,7 +782,9 @@ def render_quality(path: str, output: str, opts: QualitySettings, status: Callab
             except RuntimeError as exc:
                 if cancel is not None and cancel.is_set():raise
                 if not software and opts.encoder!='CPU x264':
-                    if status:status('GPU encoder unavailable; retrying the same codec in software…')
+                    if status:
+                        status('NVENC encoding failed: '+str(exc)[-500:]+
+                               ' — retrying in CPU software mode')
                     continue
                 raise
     raise RuntimeError('All encoder attempts failed')
