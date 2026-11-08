@@ -1225,6 +1225,58 @@ def _cazy_subprocess_flags(platform=None):
     return getattr(subprocess,'CREATE_NO_WINDOW',0) if name=='nt' else 0
 
 
+def read_abyss_start_text(frame, executable, cancel=None):
+    """Fast, focused OCR for the short-lived Start Challenge interaction HUD.
+
+    The general OCR pass runs ~0.8 seconds apart and can miss the prompt
+    entirely. This smaller crop can be read more frequently without running
+    six Tesseract passes over the whole gameplay screen. No screenshot matching.
+    """
+    import cv2
+    if not executable:
+        raise RuntimeError('Text detection needs Tesseract OCR. Locate tesseract.exe in AutoDirector.')
+    if cancel is not None and cancel.is_set():
+        raise RuntimeError('Scan cancelled')
+    h,w=frame.shape[:2]
+    if w/max(1,h)>2.6:
+        # Accept a user-cropped prompt image for calibration/diagnostics.
+        crop=frame
+    else:
+        x1,y1,x2,y2=(.53,.46,.88,.61)
+        crop=frame[int(y1*h):int(y2*h),int(x1*w):int(x2*w)]
+    if not crop.size:
+        return None,0.,''
+    gray=cv2.cvtColor(crop,cv2.COLOR_BGR2GRAY)
+    gray=cv2.resize(gray,None,fx=2.,fy=2.,
+                    interpolation=cv2.INTER_CUBIC)
+    for variant in (gray,cv2.threshold(gray,0,255,
+                    cv2.THRESH_BINARY+cv2.THRESH_OTSU)[1]):
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError('Scan cancelled')
+        ok,png=cv2.imencode('.png',variant)
+        if not ok:
+            continue
+        try:
+            result=subprocess.run(
+                [executable,'stdin','stdout','--psm','6','-l','eng'],
+                input=png.tobytes(),capture_output=True,timeout=7,
+                check=False,creationflags=_cazy_subprocess_flags())
+        except subprocess.TimeoutExpired:
+            continue
+        except OSError as exc:
+            raise RuntimeError('Could not run local Tesseract: '+str(exc)) from exc
+        if result.returncode:
+            stderr=result.stderr.decode('utf-8','replace')
+            if 'Error opening data file' in stderr:
+                raise RuntimeError('Tesseract English OCR language data is missing.')
+            continue
+        raw=result.stdout.decode('utf-8','replace')
+        if classify_screen_text(raw)=='start':
+            return 'start',.98,'Fast Start OCR: '+' '.join(raw.split())[:100]
+        # Most readable prompts are recognized without the second threshold pass.
+    return None,0.,''
+
+
 def read_abyss_frame_text(frame,executable,cancel=None):
     """Read actual Genshin UI strings using local, hidden-console Tesseract."""
     import cv2
@@ -1466,12 +1518,12 @@ def build_abyss_segments(events,source,duration,first_chamber=1):
 
 def scan_abyss_recording(path,references=None,progress=None,cancel=None,
                          sample_seconds=.8,ocr_path='',detail=None):
-    """Scan full OBS recording with high-frequency black-transition checks.
+    """Scan OCR events and aggressively sample short Start Challenge prompts.
 
-    Screens are inspected every 0.4s. Standard OCR is scheduled every 0.8s;
-    near-black transition screens are OCR'd immediately so a brief 'On the
-    other side...' flash cannot slip between slow sampling points. Suggested
-    cuts still require human review before rendering.
+    Gameplay is inspected at up to 8 fps. Short-lived interaction HUD text
+    receives its own focused OCR pass while waiting for each half to start.
+    The regular OCR path still recognizes the side transfer, completion and
+    failure screens; all exports remain reviewable before rendering.
     """
     import cv2
     footage=Path(path)
@@ -1489,12 +1541,16 @@ def scan_abyss_recording(path,references=None,progress=None,cancel=None,
         duration=frames/fps if fps>0 else 0.
         if not math.isfinite(duration) or duration<=0:
             raise RuntimeError('Cannot determine recording duration')
-        # Old mode sampled once every .8s, missing shorter transition screens.
-        # Read frames 2x more often; spend OCR cycles mostly on useful frames.
-        interval=max(.25,min(.4,float(sample_seconds)/2.))
+        # Short interaction prompts need substantially finer temporal sampling
+        # than the long end/result banners. Keep general OCR at its old rate.
+        interval=max(.10,min(.125,float(sample_seconds)/6.))
         ocr_every=max(.6,min(1.25,float(sample_seconds)))
+        start_every=.125
         next_regular_ocr=0.
+        next_start_ocr=0.
         last_transition_ocr=-100.
+        # Focused high-rate OCR is only needed between successful side starts.
+        want_start=True
         events=[]
         t=0.
         last_kind=None
@@ -1507,28 +1563,41 @@ def scan_abyss_recording(path,references=None,progress=None,cancel=None,
             ok,frame=cap.read()
             if ok:
                 profile=_abyss_screen_profile(frame,cv2)
+                kind,confidence,evidence=None,0.,''
+                # Read the small HUD region every ~125 ms while awaiting a start.
+                # Avoid doing expensive general OCR on every gameplay frame.
+                if (want_start and not profile['black_blank']
+                        and not profile['transition']
+                        and t>=next_start_ocr-.0001):
+                    kind,confidence,evidence=read_abyss_start_text(
+                        frame,executable,cancel=cancel)
+                    next_start_ocr=t+start_every
                 immediate_transition=(profile['transition']
-                                      and t-last_transition_ocr>=.4)
+                                      and t-last_transition_ocr>=.25)
                 immediate_result=(profile['result']
                                   and t>=next_regular_ocr-.35)
                 should_ocr=(immediate_transition or immediate_result
                             or t>=next_regular_ocr)
                 if profile['black_blank']:
-                    # No visible lettering; plain black loading frame.
                     should_ocr=False
-                if should_ocr:
+                if should_ocr and not kind:
                     kind,confidence,evidence=read_abyss_frame_text(
                         frame,executable,cancel=cancel)
                     if immediate_transition:
                         last_transition_ocr=t
                     next_regular_ocr=t+ocr_every
-                    if kind:
-                        if kind!=last_kind or t-last_seen>4.0:
-                            events.append({'at':round(t,2),'kind':kind,
-                                           'confidence':confidence,'evidence':evidence})
-                        last_kind,last_seen=kind,t
-                    elif t-last_seen>4.0:
-                        last_kind=None
+                if kind:
+                    if kind!=last_kind or t-last_seen>4.0:
+                        events.append({'at':round(t,2),'kind':kind,
+                                       'confidence':confidence,'evidence':evidence})
+                    last_kind,last_seen=kind,t
+                    if kind=='start':
+                        want_start=False
+                    elif kind in ('switch','complete','failure'):
+                        want_start=True
+                        next_start_ocr=t+interval
+                elif t-last_seen>4.0:
+                    last_kind=None
             if progress and (t-last_report>=1.2 or t+interval>=duration):
                 progress(min(1.,t/duration))
             if detail and (t-last_report>=1.2 or t+interval>=duration):
