@@ -60,7 +60,7 @@ ns = {
         REFERENCE_KINDS={
             'start':'Start Challenge','switch':'On the other side...',
             'complete':'Challenge Completed','failure':'Challenge Failed / Retry',
-            'blessing':'Floor / Benediction'},SEGMENT_MAX=200)
+            'blessing':'Floor / Benediction'})
 }
 exec(compile(ast.Module(body=nodes, type_ignores=[]), str(path), 'exec'), ns)
 
