@@ -380,8 +380,26 @@ def _rife_interpolation_command(executable, frames_dir, out_dir, input_count, so
                 f"RIFE {source_fps:g} -> {output_fps:g} FPS requires RIFE v4 "
                 "model files. Install or repair the RIFE AI addon using AI "
                 "Addons Setup; an older RIFE model supports only 2x FPS.")
+        # A portable RIFE installation may keep its default model under
+        # models/ rather than alongside the executable.
+        older = []
+        for folder in model_dirs:
+            if not folder.is_dir():
+                continue
+            for candidate in folder.glob("rife*"):
+                if (candidate.is_dir() and "rife-v4" not in candidate.name
+                        and any(candidate.glob("*.param"))
+                        and any(candidate.glob("*.bin"))):
+                    older.append(candidate)
+        if older:
+            def legacy_rank(p):
+                return (p.name == "rife-v2.3", str(p))
+            older_model = max(older, key=legacy_rank)
+            command += ["-m", str(older_model)]
+            model_description = older_model.name + " (2x)"
+        else:
+            model_description = "legacy default (2x)"
         expected = input_count * 2
-        model_description = "legacy default (2x)"
     command += ["-f", "%08d.png"]
     return command, expected, model_description
 
