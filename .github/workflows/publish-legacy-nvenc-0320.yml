@@ -1,0 +1,90 @@
+name: Publish Cazy Studio v0.3.20 — Legacy NVIDIA NVENC Compatibility
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-legacy-nvenc-0320.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OCR, GUI, and media test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg tesseract-ocr tesseract-ocr-eng
+      - name: Regression-test legacy NVENC selection, high FPS, OCR, GUI
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+      - name: Build and apply ZIP using actual installed v0.3.19 updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy320/base /tmp/cazy320/stage /tmp/cazy320/out
+          gh release download v0.3.19 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_19_Update.zip' --dir /tmp/cazy320/base
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy320/stage/
+          PYTHONPATH=source python - <<'PY'
+          import tempfile,zipfile,importlib.util
+          from pathlib import Path
+          from update_core import build_update_zip
+          root=Path('/tmp/cazy320')
+          previous=root/'base/Cazy_Studio_v0_3_19_Update.zip'
+          update=root/'out/Cazy_Studio_v0_3_20_Update.zip'
+          manifest=build_update_zip(root/'stage',update,'0.3.20')
+          approved={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          assert set(manifest['files'])==approved
+          with tempfile.TemporaryDirectory() as location:
+              folder=Path(location)
+              old_module=folder/'legacy.py'
+              with zipfile.ZipFile(previous) as z:
+                  old_module.write_bytes(z.read('update_core.py'))
+              spec=importlib.util.spec_from_file_location('legacy_updater',old_module)
+              legacy=importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(legacy)
+              assert approved.issubset(legacy.SAFE_FILES)
+              assert set(legacy.inspect_update_zip(update,'0.3.20')['files'])==approved
+              installed=folder/'installation'
+              installed.mkdir()
+              with zipfile.ZipFile(previous) as z:
+                  old_manifest=legacy.inspect_update_zip(previous,'0.3.19')
+                  for filename in old_manifest['files']:
+                      (installed/filename).write_bytes(z.read(filename))
+              legacy.apply_update_zip(update,installed,'0.3.20')
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.20'"
+              assert 'SCAN STATUS: Ready' in (installed/'app.py').read_text()
+              assert 'RENDER COMPLETE — 100%' in (installed/'app.py').read_text()
+              assert 'NVENC API' in (installed/'quality_engine.py').read_text()
+              legacy.rollback_latest(installed)
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.19'"
+          print('v0.3.19 updater installed/rolled back v0.3.20: PASS')
+          PY
+      - name: Publish verified NVENC compatibility update
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /tmp/cazy320/out
+          if gh release view v0.3.20 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.20 Cazy_Studio_v0_3_20_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.20 Cazy_Studio_v0_3_20_Update.zip \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.3.20 — Legacy NVIDIA NVENC Compatibility' \
+              --notes 'Fixes the NVENC API compatibility failure affecting NVIDIA driver 581.80. Cazy Studio now probes hardware encoding before the expensive video render and, when the bundled FFmpeg requires a newer NVENC API, obtains a SHA256-verified FFmpeg 7.1 binary from the pinned imageio-ffmpeg 0.6.0 wheel. The older executable is cached privately under CazyStudio app data without replacing installed packages or changing the NVIDIA driver. NVENC or CPU fallback is visibly identified in render progress, and Full Run displays the actual saved preset including frame interpolation method and FPS. Original 60 FPS footage to user-selected 240 FPS output is fully preserved; GPU RIFE AI remains a selectable option in Quality Lab while CPU Optical Flow is flagged as expensive. Maintains v0.3.19 render progress, v0.3.18 OCR fixes, saved presets and one-video export. Automated regression suite and updater install/rollback checks are required before publication. Windows NVENC functionality on the users specific driver requires a local confirmation test after update.'
+          fi
+          gh release edit v0.3.20 --repo "$GITHUB_REPOSITORY" --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_20_Update
+          path: /tmp/cazy320/out/Cazy_Studio_v0_3_20_Update.zip
+          if-no-files-found: error
