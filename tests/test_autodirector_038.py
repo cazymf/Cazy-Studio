@@ -143,7 +143,7 @@ class DetectionTests(unittest.TestCase):
         self.assertIn('def reload_presets(self)',app)
         self.assertIn('def render_reviewed(self, result',app)
         self.assertIn("self.state['success_reference']",app)
-        self.assertIn('No YouTube connection or publishing',app)
+        self.assertIn('Music Hunter is an optional online tool; no publishing.',app)
 
 
 if __name__=='__main__':
