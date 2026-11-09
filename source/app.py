@@ -1328,6 +1328,8 @@ class AutoDirectorView(tk.Frame):
         self._label(top, 'CAZY AUTODIRECTOR', 19, ACCENT, True).pack(side='left')
         self._label(top, 'Select videos  →  Scan gameplay  →  Review cuts', 10, MUTED).pack(side='left', padx=18)
         self._button(top, 'Save Library', self.save).pack(side='right')
+        self._button(top, '✦ HIGHLIGHT FINDER (BETA)',
+                     self.open_highlight_finder, True).pack(side='right',padx=(0,8))
 
         note = tk.Frame(self, bg='#172337', highlightbackground=BORDER, highlightthickness=1)
         note.pack(fill='x', padx=18, pady=(0, 10))
@@ -1657,6 +1659,13 @@ class AutoDirectorView(tk.Frame):
         self.tree.selection_set(str(j))
         self.tree.see(str(j))
         self._update_details()
+
+    def open_highlight_finder(self):
+        existing=getattr(self,'_highlight_finder_window',None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        self._highlight_finder_window=HighlightFinderWindow(self)
 
     def open_music_hunter(self):
         existing=getattr(self,'_music_hunter_window',None)
@@ -2479,6 +2488,272 @@ class AutoDirectorView(tk.Frame):
             choose()
 
 
+
+
+
+
+class HighlightFinderWindow(tk.Toplevel):
+    """Separate optional visual highlight suggestions; no Abyss cut changes."""
+
+    def __init__(self,owner):
+        super().__init__(owner)
+        self.owner=owner
+        self.title('Cazy Highlight Finder — Visual Activity Beta')
+        self.geometry('1040x760')
+        self.minsize(760,600)
+        self.configure(bg=BG)
+        self.transient(owner.winfo_toplevel())
+        chosen=owner._selected()
+        source=(owner.state['queue'][chosen]['path']
+                if 0<=chosen<len(owner.state['queue']) else
+                (owner.state['queue'][0]['path'] if owner.state['queue'] else ''))
+        self.source_var=tk.StringVar(value=source)
+        self.length_var=tk.StringVar(value='8')
+        self.max_var=tk.StringVar(value='10')
+        self.status_var=tk.StringVar(value='Choose a recording, scan visual motion, review, then export clips.')
+        self.progress_var=tk.DoubleVar(value=0.)
+        self._events=queue.Queue()
+        self._cancel=threading.Event()
+        self._busy=False
+        self._report=None
+        self._preview_photo=None
+
+        # Layout reserves the bottom toolbar BEFORE allocating expanding space.
+        footer=tk.Frame(self,bg=BG)
+        footer.pack(side='bottom',fill='x',padx=18,pady=(5,12))
+        top=tk.Frame(self,bg=BG)
+        top.pack(fill='x',padx=20,pady=(17,7))
+        tk.Label(top,text='✦ HIGHLIGHT FINDER',bg=BG,fg=ACCENT,
+                 font=('Segoe UI',18,'bold')).pack(anchor='w')
+        tk.Label(top,text='Motion/detail scoring, not a trained neural model. Independent of Abyss OCR and Full Run.',
+                 bg=BG,fg=MUTED,font=('Segoe UI',9)).pack(anchor='w')
+        source_row=tk.Frame(self,bg=CARD,padx=12,pady=10)
+        source_row.pack(fill='x',padx=18,pady=(3,6))
+        tk.Label(source_row,text='VIDEO',bg=CARD,fg=ACCENT2,
+                 font=('Segoe UI',9,'bold')).pack(anchor='w')
+        select_row=tk.Frame(source_row,bg=CARD)
+        select_row.pack(fill='x',pady=(4,3))
+        tk.Entry(select_row,textvariable=self.source_var,bg=CARD2,fg=TEXT,
+                 state='readonly',readonlybackground=CARD2,
+                 relief='flat').pack(side='left',fill='x',expand=True,ipady=7)
+        tk.Button(select_row,text='Browse Video',command=self.browse_video,
+                  bg=CARD2,fg=TEXT,relief='flat',padx=11,pady=8).pack(side='left',padx=(8,0))
+        tk.Label(source_row,text='Clip length (seconds)',bg=CARD,fg=MUTED).pack(
+            side='left',padx=(0,5))
+        ttk.Combobox(source_row,textvariable=self.length_var,
+                     values=('6','8','10','15'),width=7,state='readonly').pack(
+                         side='left',padx=(0,20))
+        tk.Label(source_row,text='Max highlights',bg=CARD,fg=MUTED).pack(
+            side='left',padx=(0,5))
+        ttk.Combobox(source_row,textvariable=self.max_var,
+                     values=('5','10','15','20'),width=7,state='readonly').pack(side='left')
+
+        label=tk.Label(self,text='RANKED MOMENTS — review suggestions before export',
+                 bg=BG,fg=ACCENT2,font=('Segoe UI',10,'bold'),anchor='w')
+        label.pack(fill='x',padx=20,pady=(7,4))
+        tree_frame=tk.Frame(self,bg=BG)
+        tree_frame.pack(fill='both',expand=True,padx=18)
+        self.table=ttk.Treeview(tree_frame,show='headings',selectmode='extended',
+                 columns=('moment','from','to','score','activity'))
+        for column,name,width in (
+            ('moment','PEAK',110),('from','START',95),('to','END',95),
+            ('score','ACTIVITY',90),('activity','WHAT WAS DETECTED',370)):
+            self.table.heading(column,text=name)
+            self.table.column(column,width=width,stretch=(column=='activity'))
+        self.table.pack(side='left',fill='both',expand=True)
+        scrollbar=ttk.Scrollbar(tree_frame,orient='vertical',command=self.table.yview)
+        scrollbar.pack(side='right',fill='y')
+        self.table.configure(yscrollcommand=scrollbar.set)
+        self.table.bind('<<TreeviewSelect>>',lambda event:self._select_status())
+        self.table.bind('<Double-1>',lambda event:self.preview_frame())
+        self.preview_label=tk.Label(self,bg=CARD2,fg=MUTED,
+                 text='Select a suggested moment and click Preview Frame',
+                 font=('Segoe UI',10),height=9)
+        self.preview_label.pack(fill='x',padx=18,pady=(7,3))
+        actions=tk.Frame(footer,bg=BG)
+        actions.pack(fill='x')
+        self.scan_button=tk.Button(actions,text='ANALYZE VIDEO',command=self.analyze,
+                 bg=ACCENT,fg='#101019',font=('Segoe UI',10,'bold'),
+                 relief='flat',padx=14,pady=10)
+        self.scan_button.pack(side='left',padx=(0,8))
+        self.preview_button=tk.Button(actions,text='Preview Frame',command=self.preview_frame,
+                 bg=CARD2,fg=TEXT,relief='flat',padx=13,pady=10)
+        self.preview_button.pack(side='left',padx=(0,8))
+        self.select_button=tk.Button(actions,text='Select All',command=self.select_all,
+                 bg=CARD2,fg=TEXT,relief='flat',padx=13,pady=10)
+        self.select_button.pack(side='left')
+        self.export_button=tk.Button(actions,text='EXPORT SELECTED CLIPS',command=self.export,
+                 bg=GREEN,fg='#101019',font=('Segoe UI',10,'bold'),
+                 relief='flat',padx=17,pady=10)
+        self.export_button.pack(side='right')
+        self.cancel_button=tk.Button(footer,text='Cancel Scan / Export',command=self.cancel,
+                 bg=CARD2,fg=TEXT,relief='flat',state='disabled',pady=5)
+        self.cancel_button.pack(fill='x',pady=(6,4))
+        ttk.Progressbar(footer,variable=self.progress_var,
+                 maximum=100,mode='determinate').pack(fill='x',ipady=3,pady=(0,5))
+        tk.Label(footer,textvariable=self.status_var,bg=BG,fg=ACCENT2,
+                 justify='left',anchor='w',font=('Segoe UI',9),
+                 wraplength=980).pack(fill='x')
+        self.after(120,self._poll)
+
+    @staticmethod
+    def _clock(seconds):
+        seconds=max(0.,float(seconds))
+        minutes=int(seconds//60)
+        return f'{minutes:02d}:{seconds%60:05.2f}'
+
+    def _busy_state(self,busy):
+        self._busy=bool(busy)
+        state='disabled' if busy else 'normal'
+        for button in (self.scan_button,self.export_button,self.preview_button,
+                       self.select_button):
+            button.configure(state=state)
+        self.cancel_button.configure(state='normal' if busy else 'disabled')
+
+    def _work(self,kind,action):
+        if self._busy:return
+        self._busy_state(True)
+        def run():
+            try:
+                data=action()
+                self._events.put((kind,data))
+            except Exception as exc:
+                self._events.put(('error',str(exc)))
+        threading.Thread(target=run,daemon=True).start()
+
+    def browse_video(self):
+        path=filedialog.askopenfilename(parent=self,title='Choose a gameplay video',
+                  filetypes=[('Video','*.mp4 *.mkv *.mov *.avi *.webm *.m4v'),
+                             ('All files','*.*')])
+        if path:
+            self.source_var.set(path)
+            self._report=None
+            self.progress_var.set(0)
+            self.status_var.set('Video selected. Click ANALYZE VIDEO.')
+            self.table.delete(*self.table.get_children())
+            self._preview_photo=None
+            self.preview_label.configure(image='',text='Preview will appear here.')
+
+    def analyze(self):
+        path=self.source_var.get().strip()
+        if not Path(path).is_file():
+            messagebox.showinfo('Highlight Finder','Choose an existing video first.',parent=self)
+            return
+        try:
+            limit=int(self.max_var.get())
+            length=float(self.length_var.get())
+        except ValueError:
+            messagebox.showerror('Highlight Finder','Choose valid clip settings.',parent=self)
+            return
+        self._cancel.clear()
+        self.progress_var.set(0)
+        self._report=None
+        self.table.delete(*self.table.get_children())
+        self.status_var.set('Analyzing motion and visual detail. No OCR is involved.')
+        self._work('scan',lambda:quality_engine.highlight_finder_scan(
+            path,limit=limit,clip_seconds=length,cancel=self._cancel,
+            progress=lambda pct,msg:self._events.put(('progress',(pct,msg)))))
+
+    def _chosen(self):
+        if not self._report:return []
+        highlights=self._report['highlights']
+        return [highlights[int(i)] for i in sorted(self.table.selection(),key=int)
+                if int(i)<len(highlights)]
+
+    def _select_status(self):
+        if not self._busy and self._report:
+            self.status_var.set(f'{len(self._chosen())} of {len(self._report["highlights"])} '
+                                'highlight suggestions selected for clip export.')
+
+    def select_all(self):
+        rows=self.table.get_children()
+        if rows:self.table.selection_set(*rows)
+        self._select_status()
+
+    def preview_frame(self):
+        selected=self._chosen()
+        if not selected:
+            messagebox.showinfo('Highlight Finder','Select a highlight first.',parent=self)
+            return
+        if self._busy:return
+        at=float(selected[0]['at'])
+        source=self._report['source']
+        self.status_var.set('Generating a preview frame at '+self._clock(at))
+        def render():
+            import io
+            ffmpeg=quality_engine.engine.get_ffmpeg()
+            cmd=[str(ffmpeg),'-hide_banner','-loglevel','error',
+                 '-nostdin','-ss',f'{at:.3f}','-i',source,
+                 '-frames:v','1','-f','image2pipe','-vcodec','png','pipe:1']
+            proc=subprocess.run(cmd,stdin=subprocess.DEVNULL,
+                 capture_output=True,timeout=40,
+                 creationflags=quality_engine._cazy_subprocess_flags())
+            if proc.returncode or not proc.stdout:
+                raise RuntimeError('FFmpeg could not preview the selected moment: '+
+                    proc.stderr.decode('utf-8','replace')[-750:])
+            with Image.open(io.BytesIO(proc.stdout)) as picture:
+                picture.thumbnail((880,275))
+                return picture.convert('RGB').copy()
+        self._work('preview',render)
+
+    def cancel(self):
+        self._cancel.set()
+        self.status_var.set('Stopping at the next safe checkpoint…')
+
+    def export(self):
+        chosen=self._chosen()
+        if not chosen:
+            messagebox.showinfo('Highlight Finder','Select some highlights first.',parent=self)
+            return
+        folder=filedialog.askdirectory(parent=self,title='Export separate highlight MP4 clips')
+        if not folder:return
+        self._cancel.clear()
+        self.progress_var.set(0)
+        self.status_var.set(f'Exporting {len(chosen)} reviewed highlight MP4s…')
+        source=self._report['source']
+        self._work('export',lambda:quality_engine.export_highlight_clips(
+            source,chosen,folder,cancel=self._cancel,
+            progress=lambda pct,msg:self._events.put(('progress',(pct,msg)))))
+
+    def _poll(self):
+        if not self.winfo_exists():return
+        try:
+            while True:
+                kind,data=self._events.get_nowait()
+                if kind=='progress':
+                    pct,msg=data
+                    self.progress_var.set(max(0.,min(100.,float(pct)*100)))
+                    self.status_var.set(str(msg))
+                    continue
+                self._busy_state(False)
+                if kind=='scan':
+                    self._report=data
+                    for i,item in enumerate(data['highlights']):
+                        self.table.insert('',tk.END,iid=str(i),values=(
+                            self._clock(item['at']),self._clock(item['start']),
+                            self._clock(item['end']),f'{item["score"]:.1f}',
+                            item['description']))
+                    self.select_all()
+                    self.status_var.set(
+                        f'{data["found"]} candidates from {data["frames_analyzed"]} '
+                        'sampled frames. These are visual-motion suggestions, '
+                        'not confirmed bursts or dodges. Review before export.')
+                elif kind=='preview':
+                    self._preview_photo=ImageTk.PhotoImage(data,master=self)
+                    self.preview_label.configure(image=self._preview_photo,text='',height=1)
+                    self.status_var.set('Preview ready. Review the clip timestamps.')
+                elif kind=='export':
+                    self.progress_var.set(100)
+                    self.status_var.set(f'Exported {data["count"]} highlights to {data["folder"]}')
+                    messagebox.showinfo('Highlight Finder',
+                        f'Exported {data["count"]} separate MP4 clips.\n\n'+
+                        data['folder'],parent=self)
+                elif kind=='error':
+                    self.status_var.set('Highlight Finder: '+str(data)[:700])
+                    messagebox.showerror('Highlight Finder',str(data)[-1500:],parent=self)
+        except queue.Empty:
+            pass
+        self.after(120,self._poll)
 
 
 class MusicHunterWindow(tk.Toplevel):
