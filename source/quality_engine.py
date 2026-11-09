@@ -2519,3 +2519,185 @@ def music_hunter_import_batch(urls,destination=None,progress=None,cancel=None):
     return {'downloaded':downloaded,'skipped':skipped,'failed':failed,
             'cancelled':bool(cancel is not None and cancel.is_set()),
             'total':len(urls),'library':str(folder)}
+
+
+# ---- Highlight Finder beta: visual activity, independent of Abyss OCR ----
+
+def rank_highlight_samples(samples, duration, clip_seconds=8., limit=10,
+                           minimum_score=28.):
+    """Rank temporal visual-activity peaks without changing Abyss cut detection.
+
+    These are motion/detail *candidates*, not semantic burst/dodge recognition.
+    """
+    duration=float(duration)
+    clip_seconds=float(clip_seconds)
+    if not math.isfinite(duration) or duration<=0:
+        raise ValueError('Highlight Finder needs a positive video duration.')
+    if not math.isfinite(clip_seconds) or not 2<=clip_seconds<=30:
+        raise ValueError('Highlight clips must be between 2 and 30 seconds.')
+    if not isinstance(limit,int) or not 1<=limit<=30:
+        raise ValueError('Choose between 1 and 30 highlights.')
+    ranked=[]
+    for sample in samples:
+        try:
+            at=float(sample['at'])
+            score=float(sample['score'])
+        except (ValueError,TypeError,KeyError):
+            continue
+        if not all(map(math.isfinite,(at,score))) or not 0<=at<=duration:
+            continue
+        if score<minimum_score:
+            continue
+        ranked.append((score,at,sample))
+    ranked.sort(key=lambda item:(-item[0],item[1]))
+    chosen=[]
+    separation=max(2.,clip_seconds*.85)
+    for score,at,sample in ranked:
+        if any(abs(at-other['at'])<separation for other in chosen):
+            continue
+        length=min(clip_seconds,duration)
+        start=max(0.,min(duration-length,at-length*.42))
+        end=start+length
+        chosen.append({
+            'at':round(at,2),'start':round(start,2),'end':round(end,2),
+            'score':round(score,1),'motion':round(float(sample.get('motion',0)),1),
+            'detail':round(float(sample.get('detail',0)),1),
+            'description':'Visual motion / detail activity',
+            'method':'Visual activity heuristic (not neural AI)',
+            'review_required':True,
+        })
+        if len(chosen)>=limit:
+            break
+    chosen.sort(key=lambda item:item['at'])
+    for index,item in enumerate(chosen,1):
+        item['number']=index
+    return chosen
+
+
+def highlight_finder_scan(path,limit=10,clip_seconds=8.,sample_fps=2.,
+                          progress=None,cancel=None):
+    """Find high-activity intervals through isolated FFmpeg BGR frame streaming.
+
+    The program never loads a native video decoder into the Tkinter process.
+    This scan is separate from Genshin challenge/event/OCR detection.
+    """
+    import contextlib
+    import cv2
+    import numpy as np
+    video=Path(path).expanduser()
+    if not video.is_file():
+        raise FileNotFoundError(str(video))
+    limit=int(limit)
+    sample_fps=float(sample_fps)
+    if not 1.<=sample_fps<=4.:
+        raise ValueError('Highlight analysis must sample between 1 and 4 FPS.')
+    decoders=_cazy_ocr_decoder_candidates()
+    failures=[]
+    for decoder in decoders:
+        try:
+            duration,source_width,source_height=_cazy_ocr_video_info(video,decoder)
+            width=min(480,source_width)
+            height=max(2,int(round(source_height*width/source_width/2)*2))
+            samples=[]
+            previous=None
+            count=0
+            with contextlib.closing(_cazy_ocr_frame_stream(
+                    video,decoder,width,height,sample_fps,cancel)) as frames:
+                for at,frame in frames:
+                    if at>=duration:break
+                    if cancel is not None and cancel.is_set():
+                        raise RuntimeError('Highlight scan cancelled.')
+                    gray=cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+                    brightness=float(gray.mean())
+                    if brightness<18 or brightness>242:
+                        previous=None
+                        continue
+                    if previous is None:
+                        previous=gray
+                        continue
+                    motion=float(cv2.absdiff(gray,previous).mean())
+                    previous=gray
+                    edges=float(cv2.Laplacian(gray,cv2.CV_32F).var())
+                    saturation=float(cv2.cvtColor(frame,cv2.COLOR_BGR2HSV)[:,:,1].mean())
+                    # Require real motion: crisp HUD/backgrounds alone cannot
+                    # be "highlights"; a black transition isn't a combat moment.
+                    score=(min(100.,motion*2.15+min(22.,edges/160.)+
+                               min(10.,saturation/28.))
+                           if motion>=2.5 else 0.)
+                    samples.append({'at':at,'score':score,'motion':motion,
+                                    'detail':edges,'saturation':saturation})
+                    count+=1
+                    if progress and count%8==0:
+                        progress(min(1.,at/duration),
+                                 'Analyzing visual activity at %.1fs / %.1fs'%(
+                                     at,duration))
+            clips=rank_highlight_samples(
+                samples,duration,clip_seconds=clip_seconds,limit=limit)
+            if progress:progress(1.,'%d visual highlight candidates ready for review'%len(clips))
+            return {
+                'source':str(video),'duration':round(duration,2),
+                'method':'Visual motion/detail scoring (not neural AI)',
+                'sample_fps':sample_fps,'frames_analyzed':count,
+                'highlights':clips,'found':len(clips),
+                'notes':['Candidate moments may include camera movement or UI effects.',
+                         'Review highlights before exporting. Original video unchanged.'],
+            }
+        except _CazyOCRDecoderFailure as exc:
+            failures.append(Path(decoder).name+': '+str(exc))
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError('Highlight scan cancelled.') from exc
+    raise RuntimeError('No isolated FFmpeg decoder could read this recording:\n' +
+                       '\n'.join(failures))
+
+
+def export_highlight_clips(source,highlights,destination,progress=None,
+                           cancel=None):
+    """Render independent MP4 highlight clips; never change a Full Run video."""
+    source=Path(source).expanduser()
+    if not source.is_file():
+        raise FileNotFoundError(str(source))
+    clips=list(highlights)
+    if not clips or len(clips)>30:
+        raise ValueError('Select 1–30 reviewed highlights to export.')
+    folder=Path(destination).expanduser()
+    folder.mkdir(parents=True,exist_ok=True)
+    ffmpeg=engine.get_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError('Cazy Studio FFmpeg was not found.')
+    outputs=[]
+    for index,item in enumerate(clips,1):
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError('Highlight clip export cancelled after %d of %d clips.'%(
+                len(outputs),len(clips)))
+        start,end=float(item['start']),float(item['end'])
+        if not all(map(math.isfinite,(start,end))) or start<0 or end<=start:
+            raise ValueError('Invalid highlight start/end timestamp.')
+        suffix=1
+        stem='Cazy_Highlight_%02d_%07.2fs'%(index,float(item.get('at',start)))
+        target=folder/(stem+'.mp4')
+        while target.exists():
+            target=folder/(stem+'_%02d.mp4'%suffix)
+            suffix+=1
+        command=[str(ffmpeg),'-hide_banner','-loglevel','error','-y',
+                 '-nostdin','-ss','%.4f'%start,'-i',str(source),
+                 '-t','%.4f'%(end-start),'-map','0:v:0','-map','0:a?',
+                 '-c:v','libx264','-preset','veryfast','-crf','19',
+                 '-pix_fmt','yuv420p','-c:a','aac','-b:a','192k',
+                 '-movflags','+faststart',str(target)]
+        if progress:progress((index-1)/len(clips),
+                             'Exporting highlight %d/%d'%(index,len(clips)))
+        try:
+            run=subprocess.run(command,stdin=subprocess.DEVNULL,
+                capture_output=True,timeout=1800,
+                creationflags=_cazy_subprocess_flags())
+        except (OSError,subprocess.TimeoutExpired) as exc:
+            target.unlink(missing_ok=True)
+            raise RuntimeError('Highlight clip export failed: '+str(exc)) from exc
+        if run.returncode or not target.is_file() or target.stat().st_size<512:
+            target.unlink(missing_ok=True)
+            reason=run.stderr.decode('utf-8','replace')[-1500:]
+            raise RuntimeError('Highlight %d export failed: '%index+reason)
+        outputs.append(str(target))
+    if progress:progress(1.,'Exported %d separate highlight MP4s'%len(outputs))
+    return {'source':str(source),'folder':str(folder),'videos':outputs,
+            'count':len(outputs),'original_unchanged':True}
