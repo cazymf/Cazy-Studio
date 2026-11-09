@@ -1302,7 +1302,7 @@ class AutoDirectorView(tk.Frame):
         note.pack(fill='x', padx=18, pady=(0, 10))
         tk.Label(note, bg='#172337', fg=ACCENT2, anchor='w',
                  text='LOCAL WORKSPACE  •  ONLY videos YOU add are included. Only selected videos are scanned. '
-                      'Your original recordings stay untouched. No YouTube connection or publishing.',
+                      'Original recordings stay untouched. Music Hunter is an optional online tool; no publishing.',
                  font=('Segoe UI', 9, 'bold'), wraplength=1250, justify='left').pack(fill='x', padx=12, pady=9)
 
         pane = tk.PanedWindow(self, orient='horizontal', bg=BG,
@@ -1412,6 +1412,8 @@ class AutoDirectorView(tk.Frame):
             anchor='w', padx=15, pady=(8, 0))
         self._check(options, 'No back-to-back repeats', self.avoid_var).pack(
             anchor='w', padx=15)
+        self._button(options, '♫ MUSIC HUNTER (BETA)', self.open_music_hunter, True).pack(
+            fill='x', padx=15, pady=(7, 3))
         self.music_count = self._label(options, 'No music selected', 9, MUTED)
         self.music_count.pack(anchor='w', padx=15, pady=(3, 11))
 
@@ -1624,6 +1626,13 @@ class AutoDirectorView(tk.Frame):
         self.tree.selection_set(str(j))
         self.tree.see(str(j))
         self._update_details()
+
+    def open_music_hunter(self):
+        existing=getattr(self,'_music_hunter_window',None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        self._music_hunter_window=MusicHunterWindow(self)
 
     def choose_music(self):
         folder = filedialog.askdirectory(parent=self, title='Choose your music collection')
@@ -2419,6 +2428,216 @@ class AutoDirectorView(tk.Frame):
             table.selection_set('0')
             choose()
 
+
+
+
+class MusicHunterWindow(tk.Toplevel):
+    """Online music discovery beta. Search/download work on a background thread."""
+
+    def __init__(self, owner):
+        super().__init__(owner)
+        self.owner=owner
+        self.title('Cazy Music Hunter — Fresh Battle Music (Beta)')
+        self.geometry('950x650')
+        self.minsize(710,520)
+        self.configure(bg=BG)
+        self.transient(owner.winfo_toplevel())
+        self.query_var=tk.StringVar(value='epic orchestral boss battle instrumental copyright free')
+        self.months_var=tk.StringVar(value='6')
+        default=Path(os.environ.get('LOCALAPPDATA') or str(Path.home()))/'CazyStudio'/'Music'
+        self.folder_var=tk.StringVar(value=owner.music_var.get() or str(default))
+        self.status_var=tk.StringVar(value='Ready. Results are recent uploads; music rights must be verified.')
+        self.permission_var=tk.BooleanVar(value=False)
+        self._busy=False
+        self._results=[]
+        self._messages=queue.Queue()
+        top=tk.Frame(self,bg=BG)
+        top.pack(fill='x',padx=20,pady=(18,8))
+        tk.Label(top,text='♫ MUSIC HUNTER',font=('Segoe UI',18,'bold'),
+                 fg=ACCENT,bg=BG).pack(anchor='w')
+        tk.Label(top,text='Freshness-first discovery • Search recent uploads • Import authorized audio',
+                 font=('Segoe UI',10),fg=MUTED,bg=BG).pack(anchor='w')
+        controls=tk.Frame(self,bg=CARD,padx=13,pady=12)
+        controls.pack(fill='x',padx=20,pady=5)
+        tk.Label(controls,text='Describe the track or genre',font=('Segoe UI',9),
+                 fg=MUTED,bg=CARD).grid(row=0,column=0,sticky='w')
+        tk.Entry(controls,textvariable=self.query_var,fg=TEXT,bg=CARD2,
+                 insertbackground=TEXT,relief='flat',font=('Segoe UI',10)).grid(
+                     row=1,column=0,sticky='ew',ipady=8,padx=(0,8))
+        tk.Label(controls,text='Last N months',font=('Segoe UI',9),
+                 fg=MUTED,bg=CARD).grid(row=0,column=1,sticky='w')
+        combo=ttk.Combobox(controls,textvariable=self.months_var,
+                           values=('1','3','6','12'),state='readonly',width=7)
+        combo.grid(row=1,column=1,sticky='ew',padx=5)
+        self.search_button=tk.Button(controls,text='SEARCH NEWEST',command=self.search,
+            bg=ACCENT,fg='#101019',font=('Segoe UI',9,'bold'),relief='flat',padx=8,pady=6)
+        self.search_button.grid(row=1,column=2,padx=8)
+        controls.columnconfigure(0,weight=1)
+        tk.Label(self,text='Songs are sorted by verified upload date; a recent upload may be an older composition.',
+                 font=('Segoe UI',9),fg=YELLOW,bg=BG).pack(anchor='w',padx=21,pady=(4,8))
+        table_frame=tk.Frame(self,bg=BG)
+        table_frame.pack(fill='both',expand=True,padx=20)
+        self.table=ttk.Treeview(table_frame,
+              columns=('date','song','creator','rights'),show='headings',selectmode='browse')
+        for col,label,width in (
+            ('date','UPLOADED',105),('song','SONG',360),
+            ('creator','CHANNEL',150),('rights','LICENSE INFO',200)):
+            self.table.heading(col,text=label)
+            self.table.column(col,width=width,stretch=(col=='song'))
+        self.table.pack(side='left',fill='both',expand=True)
+        sb=ttk.Scrollbar(table_frame,orient='vertical',command=self.table.yview)
+        sb.pack(side='right',fill='y')
+        self.table.configure(yscrollcommand=sb.set)
+        self.table.bind('<Double-1>',lambda event:self.preview())
+        actions=tk.Frame(self,bg=BG)
+        actions.pack(fill='x',padx=20,pady=(10,5))
+        for label,callback in (
+            ('Open Selected Preview',self.preview),
+            ('Install / Update Music Tools',self.install_tools)):
+            tk.Button(actions,text=label,command=callback,bg=CARD2,fg=TEXT,
+                      relief='flat',padx=12,pady=7).pack(side='left',padx=(0,8))
+        self.permission_check=tk.Checkbutton(self,
+            text='I own this track or have permission to download and reuse the selected audio.',
+            variable=self.permission_var,bg=BG,fg=TEXT,activebackground=BG,
+            activeforeground=TEXT,selectcolor=CARD2,anchor='w',
+            font=('Segoe UI',9))
+        self.permission_check.pack(anchor='w',padx=20,pady=(5,4))
+        folder_row=tk.Frame(self,bg=BG)
+        folder_row.pack(fill='x',padx=20)
+        tk.Label(folder_row,text='MP3 library:',bg=BG,fg=MUTED).pack(side='left')
+        tk.Entry(folder_row,textvariable=self.folder_var,
+                 state='readonly',readonlybackground=CARD2,
+                 bg=CARD2,fg=TEXT,relief='flat').pack(side='left',fill='x',
+                                                   expand=True,padx=8,ipady=5)
+        tk.Button(folder_row,text='Choose Folder',command=self.choose_folder,
+                  bg=CARD2,fg=TEXT,relief='flat',padx=9,pady=6).pack(side='left')
+        self.download_button=tk.Button(self,text='DOWNLOAD AUTHORIZED AUDIO → MP3 → ADD TO LIBRARY',
+                 command=self.download,bg=ACCENT,fg='#101019',relief='flat',
+                 font=('Segoe UI',10,'bold'),padx=10,pady=9)
+        self.download_button.pack(fill='x',padx=20,pady=(9,7))
+        tk.Label(self,textvariable=self.status_var,bg=BG,fg=ACCENT2,
+                 font=('Segoe UI',9),anchor='w',wraplength=870,
+                 justify='left').pack(fill='x',padx=20,pady=(0,12))
+        self.after(150,self._poll)
+
+    def _set_busy(self,busy):
+        self._busy=bool(busy)
+        state='disabled' if busy else 'normal'
+        self.search_button.configure(state=state)
+        self.download_button.configure(state=state)
+
+    def _selected(self):
+        selection=self.table.selection()
+        if not selection:return None
+        index=int(selection[0])
+        return self._results[index] if 0<=index<len(self._results) else None
+
+    def _work(self,kind,action):
+        if self._busy:return
+        self._set_busy(True)
+        def run():
+            try:
+                result=action()
+                self._messages.put((kind,result))
+            except Exception as exc:
+                self._messages.put(('error',str(exc)))
+        threading.Thread(target=run,daemon=True).start()
+
+    def search(self):
+        query=self.query_var.get().strip()
+        try:months=int(self.months_var.get())
+        except ValueError:
+            messagebox.showerror('Music Hunter','Choose a valid time window.',parent=self)
+            return
+        self._results=[]
+        for child in self.table.get_children():
+            self.table.delete(child)
+        self.status_var.set('Searching and verifying dates…')
+        self._work('search',lambda:quality_engine.music_hunter_search(
+            query,months=months,limit=10,
+            progress=lambda message:self._messages.put(('progress',message))))
+
+    def preview(self):
+        import webbrowser
+        item=self._selected()
+        if item:
+            webbrowser.open(item['url'])
+        else:
+            messagebox.showinfo('Music Hunter','Select a song first.',parent=self)
+
+    def choose_folder(self):
+        folder=filedialog.askdirectory(parent=self,title='Choose MP3 music library')
+        if folder:self.folder_var.set(folder)
+
+    def install_tools(self):
+        if self._busy:return
+        import sys
+        self.status_var.set('Installing yt-dlp for local music discovery…')
+        def install():
+            completed=subprocess.run(
+                [sys.executable,'-m','pip','install','--disable-pip-version-check','-U','yt-dlp'],
+                stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,
+                timeout=240,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+            if completed.returncode:
+                raise RuntimeError('yt-dlp installation failed: '+
+                    completed.stdout.decode('utf-8','replace')[-1300:])
+            return 'yt-dlp installed. Click SEARCH NEWEST to discover recent music.'
+        self._work('installed',install)
+
+    def download(self):
+        item=self._selected()
+        if not item:
+            messagebox.showinfo('Music Hunter','Select a song first.',parent=self)
+            return
+        if not self.permission_var.get():
+            messagebox.showinfo('Music Hunter',
+                'Confirm that you own the selected music or have permission to download and reuse it.',
+                parent=self)
+            return
+        folder=self.folder_var.get()
+        if not folder:
+            messagebox.showinfo('Music Hunter','Choose a music library folder.',parent=self)
+            return
+        self.status_var.set('Importing selected audio…')
+        self._work('download',lambda:quality_engine.music_hunter_import(
+            item['url'],folder,
+            progress=lambda message:self._messages.put(('progress',message))))
+
+    def _poll(self):
+        if not self.winfo_exists():return
+        try:
+            while True:
+                kind,data=self._messages.get_nowait()
+                if kind=='progress':
+                    self.status_var.set(str(data))
+                    continue
+                self._set_busy(False)
+                if kind=='search':
+                    self._results=list(data)
+                    for i,item in enumerate(self._results):
+                        self.table.insert('',tk.END,iid=str(i),values=(
+                            item['upload_date'],item['title'],
+                            item['channel'],item['license']))
+                    self.status_var.set(
+                        f'{len(self._results)} verified-recent uploads. '
+                        'Preview and check the creator license before importing.'
+                        if self._results else
+                        'No verified-recent matches found. Try a broader phrase or 12 months.')
+                elif kind=='download':
+                    self.owner.music_var.set(self.folder_var.get())
+                    self.owner.save()
+                    self.owner.refresh()
+                    self.status_var.set('MP3 added to AutoDirector library: '+Path(data).name)
+                    messagebox.showinfo('Music Hunter',
+                        'MP3 saved to AutoDirector music library:\n'+str(data),parent=self)
+                elif kind=='installed':
+                    self.status_var.set(str(data))
+                elif kind=='error':
+                    self.status_var.set('Music Hunter error: '+str(data)[:800])
+                    messagebox.showerror('Music Hunter',str(data)[-1500:],parent=self)
+        except queue.Empty:
+            pass
+        self.after(150,self._poll)
 
 
 if __name__=='__main__':
