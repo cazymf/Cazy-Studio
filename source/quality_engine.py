@@ -3065,3 +3065,116 @@ def creative_export_thumbnail(source,at,destination,title='',subtitle=''):
     canvas.save(output,optimize=True)
     return {'image':str(output),'source':str(source),'at':at,
             'size':(1280,720),'title':text,'subtitle':sub}
+
+
+def creative_vsr_preflight(model,model_dir='',weights='',python_exe=''):
+    """Inspect *actual* external model files; no claim of bundled neural weights.
+
+    RealBasicVSR uses the authors' standalone video inference CLI.
+    EGVSR needs an external video wrapper around its dataset-oriented test code.
+    """
+    import sys
+    model=str(model)
+    if model not in ('RealBasicVSR','EGVSR'):
+        raise ValueError('Choose RealBasicVSR or EGVSR.')
+    repo=Path(model_dir).expanduser() if model_dir else Path('.')
+    checkpoint=Path(weights).expanduser() if weights else None
+    executable=Path(python_exe).expanduser() if python_exe else Path(sys.executable)
+    script=repo/('inference_realbasicvsr.py' if model=='RealBasicVSR'
+                 else 'cazy_egvsr_video.py')
+    config=repo/'configs'/'realbasicvsr_x4.py'
+    missing=[]
+    if not repo.is_dir():missing.append('model repository folder')
+    if not script.is_file():
+        missing.append('official RealBasicVSR inference_realbasicvsr.py'
+                       if model=='RealBasicVSR' else
+                       'EGVSR video adapter cazy_egvsr_video.py')
+    if model=='RealBasicVSR' and not config.is_file():
+        missing.append('configs/realbasicvsr_x4.py')
+    if not checkpoint or not checkpoint.is_file():missing.append('model checkpoint .pth')
+    if not executable.is_file():missing.append('Python executable with CUDA/PyTorch')
+    message=('Ready to attempt GPU inference. CUDA/PyTorch runtime not validated.'
+             if not missing else
+             'Model is not installed/configured: '+', '.join(missing))
+    return {'model':model,'ready':not bool(missing),'missing':missing,
+            'message':message,'repository':str(repo),'weights':str(checkpoint or ''),
+            'python':str(executable),'script':str(script),
+            'config':str(config) if model=='RealBasicVSR' else '',
+            'status':'Ready to attempt (not benchmarked)' if not missing else 'Setup required'}
+
+
+def creative_vsr_ab_preview(source,destination,model,model_dir,weights,
+                            python_exe='',seconds=8,progress=None,cancel=None):
+    """Produce a short side-by-side video with a *real* configured neural model.
+
+    Never silently substitute Lanczos for RealBasicVSR or EGVSR. The model must
+    actually produce a playable video before Cazy Studio makes an A/B export.
+    """
+    import sys
+    source=Path(source).expanduser()
+    if not source.is_file():raise FileNotFoundError(str(source))
+    status=creative_vsr_preflight(model,model_dir,weights,python_exe)
+    if not status['ready']:
+        raise RuntimeError(status['message'])
+    seconds=float(seconds)
+    if not math.isfinite(seconds) or not 2<=seconds<=15:
+        raise ValueError('A/B preview must be between 2 and 15 seconds.')
+    folder=Path(destination).expanduser()
+    folder.mkdir(parents=True,exist_ok=True)
+    output=folder/('Cazy_VSR_Comparison_'+model+'.mp4')
+    number=2
+    while output.exists():
+        output=folder/(f'Cazy_VSR_Comparison_{model}_{number}.mp4')
+        number+=1
+    ff=_creative_ffmpeg()
+    repo=Path(status['repository'])
+    executable=status['python'] or sys.executable
+    with tempfile.TemporaryDirectory(prefix='cazy_vsr_',dir=folder) as scratch:
+        tmp=Path(scratch)
+        sample=tmp/'sample.mp4'
+        processed=tmp/'enhanced.mp4'
+        if progress:progress(.05,'Extracting short original sample')
+        _creative_run([ff,'-hide_banner','-loglevel','error','-y',
+                       '-nostdin','-i',str(source),'-t',f'{seconds:.3f}',
+                       '-c:v','libx264','-preset','fast','-crf','17',
+                       '-an',str(sample)],cancel=cancel,timeout=180)
+        if model=='RealBasicVSR':
+            command=[executable,status['script'],status['config'],
+                     status['weights'],str(sample),str(processed),
+                     '--max-seq-len=10','--fps=30']
+        else:
+            # User-provided explicit video bridge around EGVSR's test entrypoint.
+            command=[executable,status['script'],'--input',str(sample),
+                     '--output',str(processed),'--weights',status['weights']]
+        if progress:progress(.15,'Running actual '+model+' model inference')
+        _creative_run(command,cancel=cancel,timeout=3600,cwd=repo)
+        if not processed.is_file() or processed.stat().st_size<1024:
+            raise RuntimeError(model+' produced no valid enhanced video.')
+        # Use processed output geometry and keep the original on the left.
+        enhanced=engine.probe(str(processed))
+        width,height=int(enhanced.width),int(enhanced.height)
+        if min(width,height)<64 or max(width,height)>8192:
+            raise ValueError('Unexpected restored video dimensions.')
+        if progress:progress(.85,'Building Original vs '+model+' comparison')
+        filtergraph=(f'[0:v]scale={width}:{height}:flags=lanczos,setsar=1[left];'
+                     '[1:v]setsar=1[right];[left][right]hstack=inputs=2[v]')
+        _creative_run([ff,'-hide_banner','-loglevel','error','-y','-nostdin',
+                       '-i',str(sample),'-i',str(processed),'-filter_complex',
+                       filtergraph,'-map','[v]','-c:v','libx264',
+                       '-preset','fast','-crf','21','-pix_fmt','yuv420p',
+                       '-shortest',str(output)],cancel=cancel,timeout=1800)
+        if not output.is_file() or output.stat().st_size<1024:
+            raise RuntimeError('Side-by-side comparison failed.')
+    if progress:progress(1.,model+' A/B video created; inspect for flicker and detail')
+    return {'comparison':str(output),'model':model,'source':str(source),
+            'seconds':seconds,'gpu_tested':True,'left':'Original (scaled)',
+            'right':model,'audio':'None — comparison only'}
+
+
+def creative_bug_report_path(destination,title='Cazy Studio Test Notes'):
+    from datetime import datetime
+    folder=Path(destination).expanduser()
+    folder.mkdir(parents=True,exist_ok=True)
+    base=re.sub(r'[^A-Za-z0-9_-]','_',str(title)).strip('_')[:64] or 'Cazy_Bugs'
+    date=datetime.now().strftime('%Y%m%d_%H%M%S')
+    return folder/(f'{base}_{date}.md')
