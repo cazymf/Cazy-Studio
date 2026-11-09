@@ -17,6 +17,39 @@ import quality_engine as quality
 
 
 class IsolatedOCRDecoderTests(unittest.TestCase):
+    def test_windows_decoder_candidates_without_cached_legacy(self):
+        """Reproduce the Windows startup path that used to raise NameError."""
+        with tempfile.TemporaryDirectory() as folder:
+            legacy=Path(folder)/'missing_legacy.exe'
+            with mock.patch.object(quality.os,'name','nt'), \
+                 mock.patch.object(quality.engine,'get_ffmpeg',
+                                   return_value='bundled-ffmpeg.exe',create=True), \
+                 mock.patch.object(quality,'_legacy_ffmpeg_cache_path',
+                                   return_value=legacy), \
+                 mock.patch.object(quality.shutil,'which',
+                                   return_value='system-ffmpeg.exe'):
+                candidates=quality._cazy_ocr_decoder_candidates()
+        self.assertEqual(candidates,['bundled-ffmpeg.exe','system-ffmpeg.exe'])
+
+    def test_windows_decoder_candidates_with_cached_legacy(self):
+        with tempfile.TemporaryDirectory() as folder:
+            legacy=Path(folder)/'cached_ffmpeg_7.exe'
+            legacy.write_bytes(b'dummy')
+            with mock.patch.object(quality.os,'name','nt'), \
+                 mock.patch.object(quality.engine,'get_ffmpeg',
+                                   return_value='bundled-ffmpeg.exe',create=True), \
+                 mock.patch.object(quality,'_legacy_ffmpeg_cache_path',
+                                   return_value=legacy), \
+                 mock.patch.object(quality.shutil,'which',return_value=None):
+                candidates=quality._cazy_ocr_decoder_candidates()
+        self.assertEqual(candidates,['bundled-ffmpeg.exe',str(legacy)])
+
+    def test_main_app_version_is_not_hardcoded(self):
+        app=(ROOT/'source'/'app.py').read_text(encoding='utf-8')
+        self.assertIn('from version import APP_VERSION',app)
+        self.assertIn("self.title(f'Cazy Studio v{APP_VERSION}",app)
+        self.assertIn("text=f'v{APP_VERSION}'",app)
+
     def test_native_videoio_is_not_used_by_ocr_or_thumbnail(self):
         source = (ROOT/'source'/'quality_engine.py').read_text(encoding='utf-8')
         scanner = source[source.index('def scan_abyss_recording('):
