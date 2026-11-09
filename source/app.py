@@ -2632,7 +2632,7 @@ class HighlightFinderWindow(tk.Toplevel):
             self.status_var.set('Video selected. Click ANALYZE VIDEO.')
             self.table.delete(*self.table.get_children())
             self._preview_photo=None
-            self.preview_label.configure(image='',text='Preview will appear here.')
+            self.preview_label.configure(image='',text='Preview will appear here.',height=9)
 
     def analyze(self):
         path=self.source_var.get().strip()
@@ -2692,7 +2692,7 @@ class HighlightFinderWindow(tk.Toplevel):
                 raise RuntimeError('FFmpeg could not preview the selected moment: '+
                     proc.stderr.decode('utf-8','replace')[-750:])
             with Image.open(io.BytesIO(proc.stdout)) as picture:
-                picture.thumbnail((880,275))
+                picture.thumbnail((880,225))
                 return picture.convert('RGB').copy()
         self._work('preview',render)
 
@@ -2740,7 +2740,7 @@ class HighlightFinderWindow(tk.Toplevel):
                         'not confirmed bursts or dodges. Review before export.')
                 elif kind=='preview':
                     self._preview_photo=ImageTk.PhotoImage(data,master=self)
-                    self.preview_label.configure(image=self._preview_photo,text='',height=1)
+                    self.preview_label.configure(image=self._preview_photo,text='',height=data.height)
                     self.status_var.set('Preview ready. Review the clip timestamps.')
                 elif kind=='export':
                     self.progress_var.set(100)
