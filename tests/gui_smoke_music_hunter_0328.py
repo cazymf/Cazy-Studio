@@ -34,7 +34,8 @@ with tempfile.TemporaryDirectory() as folder:
             music_hunter_library_path=lambda:Path(folder)/'CazyStudio'/'Music')}
     exec(compile(ast.Module(body=nodes,type_ignores=[]),str(app),'exec'),ns)
     root=tk.Tk()
-    root.withdraw()
+    root.geometry('1040x760')
+    root.update()
     class DummyOwner(tk.Frame):
         def __init__(self,parent):
             super().__init__(parent)
