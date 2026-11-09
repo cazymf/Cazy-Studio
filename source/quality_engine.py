@@ -1730,115 +1730,238 @@ def build_abyss_segments(events,source,duration,first_chamber=1):
             "discarded_attempts":discarded,"notes":notes}
 
 
-def scan_abyss_recording(path,references=None,progress=None,cancel=None,
-                         sample_seconds=.8,ocr_path='',detail=None):
-    """Scan OCR events and aggressively sample short Start Challenge prompts.
+class _CazyOCRDecoderFailure(RuntimeError):
+    """An isolated FFmpeg decoder failed; the Studio process can keep running."""
 
-    Gameplay is inspected at up to 8 fps. Short-lived interaction HUD text
-    receives its own focused OCR pass while waiting for each half to start.
-    The regular OCR path still recognizes the side transfer, completion and
-    failure screens; all exports remain reviewable before rendering.
-    """
-    import cv2
-    footage=Path(path)
-    if not footage.is_file():
-        raise FileNotFoundError(str(footage))
-    executable=_cazy_tesseract(ocr_path)
-    if not executable:
-        raise RuntimeError('Text detection requires Tesseract OCR. Use Locate Tesseract in AutoDirector.')
-    cap=cv2.VideoCapture(str(footage))
-    if not cap.isOpened():
-        raise RuntimeError('Could not open recording: '+footage.name)
+
+def _cazy_ocr_decoder_candidates():
+    """Prefer the bundled decoder; retry with installed alternatives if it exits."""
+    candidates = []
+    get_ffmpeg = getattr(engine, 'get_ffmpeg', None)
+    if callable(get_ffmpeg):
+        try:
+            candidates.append(str(get_ffmpeg()))
+        except (OSError, RuntimeError):
+            pass
+    if os.name == 'nt':
+        legacy = _legacy_ffmpeg_path()
+        if legacy.is_file():
+            candidates.append(str(legacy))
+    system = shutil.which('ffmpeg')
+    if system:
+        candidates.append(system)
+    distinct = []
+    for candidate in candidates:
+        if candidate and candidate not in distinct:
+            distinct.append(candidate)
+    if not distinct:
+        raise RuntimeError('FFmpeg is unavailable. Repair the Cazy Studio media dependencies.')
+    return distinct
+
+
+def _cazy_ocr_video_info(path, executable):
+    """Get duration and dimensions without loading an in-process video decoder."""
+    probe = getattr(engine, 'probe', None)
+    if callable(probe):
+        try:
+            info = probe(str(path))
+            duration = float(info.duration)
+            w, h = int(info.width), int(info.height)
+            if math.isfinite(duration) and duration > 0 and w > 0 and h > 0:
+                return duration, w, h
+        except (OSError, RuntimeError, ValueError, AttributeError, TypeError):
+            pass
     try:
-        fps=float(cap.get(cv2.CAP_PROP_FPS) or 0.)
-        frames=int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        duration=frames/fps if fps>0 else 0.
-        if not math.isfinite(duration) or duration<=0:
-            raise RuntimeError('Cannot determine recording duration')
-        # Short interaction prompts need substantially finer temporal sampling
-        # than the long end/result banners. Keep general OCR at its old rate.
-        interval=max(.10,min(.125,float(sample_seconds)/6.))
-        ocr_every=max(.6,min(1.25,float(sample_seconds)))
-        start_every=.125
-        next_regular_ocr=0.
-        next_start_ocr=0.
-        last_transition_ocr=-100.
-        # Focused high-rate OCR is only needed between successful side starts.
-        want_start=True
-        events=[]
-        t=0.
-        last_kind=None
-        last_seen=-100.
-        last_report=-100.
-        while t<duration:
+        result = subprocess.run(
+            [str(executable), '-hide_banner', '-i', str(path)],
+            stdin=subprocess.DEVNULL, capture_output=True, timeout=30,
+            creationflags=_cazy_subprocess_flags())
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _CazyOCRDecoderFailure('FFmpeg could not inspect the recording: ' + str(exc)) from exc
+    output = result.stderr.decode('utf-8', 'replace')
+    match = re.search(r'Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)', output)
+    stream = next((line for line in output.splitlines() if 'Video:' in line), '')
+    size = re.search(r'(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)', stream)
+    if not match or not size:
+        raise _CazyOCRDecoderFailure('FFmpeg could not read recording metadata: ' +
+                                      Path(path).name + '\n' + output[-1200:])
+    duration = int(match[1])*3600 + int(match[2])*60 + float(match[3])
+    width, height = int(size[1]), int(size[2])
+    if duration <= 0 or width <= 0 or height <= 0:
+        raise _CazyOCRDecoderFailure('Invalid recording duration or resolution')
+    return duration, width, height
+
+
+def _cazy_ocr_frame_stream(path, executable, width, height, sample_fps, cancel=None):
+    """Stream bounded-size raw BGR frames from *another process*.
+
+    A crashing native FFmpeg codec can now kill only its child process, not
+    Cazy Studio's pythonw.exe. stderr goes to a file to avoid pipe deadlock.
+    """
+    import numpy as np
+    frame_bytes = width * height * 3
+    command = [
+        str(executable), '-hide_banner', '-loglevel', 'error',
+        '-nostdin', '-threads', '2', '-i', str(path),
+        '-map', '0:v:0', '-an', '-sn', '-dn',
+        '-filter_threads', '1',
+        '-vf', f'fps={sample_fps:.8f},scale={width}:{height}:flags=bilinear',
+        '-pix_fmt', 'bgr24', '-f', 'rawvideo', 'pipe:1'
+    ]
+    with tempfile.TemporaryFile() as errors:
+        try:
+            proc = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=errors,
+                stdin=subprocess.DEVNULL, creationflags=_cazy_subprocess_flags())
+        except OSError as exc:
+            raise _CazyOCRDecoderFailure('Could not start FFmpeg OCR decoder: ' + str(exc)) from exc
+        count = 0
+        try:
+            while True:
+                if cancel is not None and cancel.is_set():
+                    raise RuntimeError('Scan cancelled')
+                data = proc.stdout.read(frame_bytes)
+                if not data:
+                    break
+                if len(data) != frame_bytes:
+                    raise _CazyOCRDecoderFailure('FFmpeg returned a partial video frame')
+                frame = np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3)
+                yield count/sample_fps, frame
+                count += 1
+            code = proc.wait(timeout=10)
+            if code != 0 or count == 0:
+                errors.seek(0, os.SEEK_END)
+                size = errors.tell()
+                errors.seek(max(0, size-3000))
+                reason = errors.read().decode('utf-8', 'replace').strip()
+                raise _CazyOCRDecoderFailure(
+                    f'External FFmpeg OCR decoder exited with code {code} '
+                    f'(0x{code & 0xffffffff:08X}). ' + (reason or 'No diagnostic text returned.'))
+        except subprocess.TimeoutExpired as exc:
+            raise _CazyOCRDecoderFailure('FFmpeg OCR decoder did not exit normally') from exc
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            proc.stdout.close()
+
+
+def _cazy_scan_abyss_external(path, executable, decoder, progress, cancel,
+                              sample_seconds, detail):
+    """OCR is unchanged; only the unsafe native video decoding is replaced."""
+    import contextlib
+    import cv2
+    footage = Path(path)
+    duration, source_width, source_height = _cazy_ocr_video_info(footage, decoder)
+    # Keep OCR readable while bounding frame memory, including for 4K OBS files.
+    width = min(1600, source_width)
+    height = max(2, int(round(source_height * width / source_width / 2) * 2))
+    interval = max(.10, min(.125, float(sample_seconds)/6.))
+    sample_fps = 1. / interval
+    ocr_every = max(.6, min(1.25, float(sample_seconds)))
+    start_every = .125
+    next_regular_ocr = 0.
+    next_start_ocr = 0.
+    last_transition_ocr = -100.
+    want_start = True
+    events = []
+    last_kind = None
+    last_seen = -100.
+    last_report = -100.
+    with contextlib.closing(_cazy_ocr_frame_stream(
+            footage, decoder, width, height, sample_fps, cancel)) as frames:
+        for t, frame in frames:
+            if t >= duration:
+                break
             if cancel is not None and cancel.is_set():
                 raise RuntimeError('Scan cancelled')
-            cap.set(cv2.CAP_PROP_POS_MSEC,t*1000.)
-            ok,frame=cap.read()
-            if ok:
-                profile=_abyss_screen_profile(frame,cv2)
-                kind,confidence,evidence=None,0.,''
-                # Read the small HUD region every ~125 ms while awaiting a start.
-                # Avoid doing expensive general OCR on every gameplay frame.
-                if (want_start and not profile['black_blank']
-                        and not profile['transition']
-                        and t>=next_start_ocr-.0001):
-                    # Alternate the original grayscale view with binary
-                    # thresholding; one Tesseract call per short time slice.
-                    kind,confidence,evidence=read_abyss_start_text(
-                        frame,executable,cancel=cancel,
-                        threshold=(int(t/start_every+.001)%4==3))
-                    next_start_ocr=t+start_every
-                immediate_transition=(profile['transition']
-                                      and t-last_transition_ocr>=.25)
-                immediate_result=(profile['result']
-                                  and t>=next_regular_ocr-.35)
-                should_ocr=(immediate_transition or immediate_result
-                            or t>=next_regular_ocr)
-                if profile['black_blank']:
-                    should_ocr=False
-                if should_ocr and not kind:
-                    kind,confidence,evidence=read_abyss_frame_text(
-                        frame,executable,cancel=cancel)
-                    if immediate_transition:
-                        last_transition_ocr=t
-                    next_regular_ocr=t+ocr_every
-                if kind:
-                    if kind!=last_kind or t-last_seen>4.0:
-                        events.append({'at':round(t,2),'kind':kind,
-                                       'confidence':confidence,'evidence':evidence})
-                    last_kind,last_seen=kind,t
-                    if kind=='start':
-                        want_start=False
-                    elif kind in ('switch','complete','failure'):
-                        want_start=True
-                        next_start_ocr=t+interval
-                elif t-last_seen>4.0:
-                    last_kind=None
-            if progress and (t-last_report>=1.2 or t+interval>=duration):
-                progress(min(1.,t/duration))
-            if detail and (t-last_report>=1.2 or t+interval>=duration):
-                counts={kind:sum(event['kind']==kind for event in events)
-                        for kind in ('start','switch','complete','failure')}
-                detail({'at':round(t,2),'duration':round(duration,2),
-                        'found':', '.join(f'{k.title()} {v}'
-                                           for k,v in counts.items()),
-                        'counts':counts})
-            if t-last_report>=1.2 or t+interval>=duration:
-                last_report=t
-            t+=interval
-        if progress:
-            progress(1.)
-        events=collapse_events(events)
-        output=build_abyss_segments(events,footage,duration)
-        counts={kind:sum(item.get('kind')==kind for item in events)
-                for kind in REFERENCE_KINDS}
-        return {'path':str(footage),'duration':duration,
-                'ocr_available':True,'detection_method':'Local text OCR',
-                'events':events,'event_counts':counts,**output}
-    finally:
-        cap.release()
+            profile = _abyss_screen_profile(frame, cv2)
+            kind, confidence, evidence = None, 0., ''
+            if (want_start and not profile['black_blank']
+                    and not profile['transition']
+                    and t >= next_start_ocr-.0001):
+                kind, confidence, evidence = read_abyss_start_text(
+                    frame, executable, cancel=cancel,
+                    threshold=(int(t/start_every+.001)%4==3))
+                next_start_ocr = t + start_every
+            immediate_transition = (profile['transition']
+                                    and t-last_transition_ocr >= .25)
+            immediate_result = (profile['result']
+                                and t >= next_regular_ocr-.35)
+            should_ocr = (immediate_transition or immediate_result
+                          or t >= next_regular_ocr)
+            if profile['black_blank']:
+                should_ocr = False
+            if should_ocr and not kind:
+                kind, confidence, evidence = read_abyss_frame_text(
+                    frame, executable, cancel=cancel)
+                if immediate_transition:
+                    last_transition_ocr = t
+                next_regular_ocr = t + ocr_every
+            if kind:
+                if kind != last_kind or t-last_seen > 4.:
+                    events.append({'at': round(t, 2), 'kind': kind,
+                                   'confidence': confidence, 'evidence': evidence})
+                last_kind, last_seen = kind, t
+                if kind == 'start':
+                    want_start = False
+                elif kind in ('switch', 'complete', 'failure'):
+                    want_start = True
+                    next_start_ocr = t + interval
+            elif t-last_seen > 4.:
+                last_kind = None
+            if t-last_report >= 1.2 or t+interval >= duration:
+                if progress:
+                    progress(min(1., t/duration))
+                if detail:
+                    counts = {kind: sum(event['kind'] == kind for event in events)
+                              for kind in ('start','switch','complete','failure')}
+                    detail({'at': round(t, 2), 'duration': round(duration, 2),
+                            'found': ', '.join(f'{k.title()} {v}'
+                                               for k, v in counts.items()),
+                            'counts': counts})
+                last_report = t
+    if progress:
+        progress(1.)
+    events = collapse_events(events)
+    output = build_abyss_segments(events, footage, duration)
+    counts = {kind: sum(item.get('kind') == kind for item in events)
+              for kind in REFERENCE_KINDS}
+    return {'path': str(footage), 'duration': duration,
+            'ocr_available': True, 'detection_method': 'Local text OCR (external decoder)',
+            'events': events, 'event_counts': counts, **output}
 
+
+def scan_abyss_recording(path,references=None,progress=None,cancel=None,
+                         sample_seconds=.8,ocr_path='',detail=None):
+    """Scan challenge text using an isolated FFmpeg video decoder.
+
+    No cv2.VideoCapture is executed in this OCR path. Decoder access violations
+    are contained in the child process; alternate installed FFmpeg builds are
+    tried when the primary decoder fails.
+    """
+    footage = Path(path)
+    if not footage.is_file():
+        raise FileNotFoundError(str(footage))
+    executable = _cazy_tesseract(ocr_path)
+    if not executable:
+        raise RuntimeError('Text detection requires Tesseract OCR. Use Locate Tesseract in AutoDirector.')
+    failures = []
+    for decoder in _cazy_ocr_decoder_candidates():
+        try:
+            return _cazy_scan_abyss_external(
+                footage, executable, decoder, progress, cancel,
+                sample_seconds, detail)
+        except _CazyOCRDecoderFailure as exc:
+            failures.append(f'{Path(decoder).name}: {exc}')
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError('Scan cancelled') from exc
+    raise RuntimeError('All FFmpeg OCR decoders failed. Cazy Studio is still running.\n'
+                       + '\n'.join(failures))
 
 def scan_full_run(paths,references=None,progress=None,cancel=None,
                   sample_seconds=.8,ocr_path='',detail=None):
@@ -1934,7 +2057,6 @@ def render_full_run(segments,destination,preset_name,music="",progress=None,
     stream-copies those segments, preserving video quality. Music is mixed
     ONCE over the assembled run, not restarted for each half.
     """
-    import cv2
     from PIL import Image,ImageDraw,ImageFont
 
     cuts=validate_full_run_segments(segments)
@@ -2044,15 +2166,29 @@ def render_full_run(segments,destination,preset_name,music="",progress=None,
         if not final.is_file() or final.stat().st_size<1024:
             raise RuntimeError("Full Run export was empty")
 
-        cap=cv2.VideoCapture(str(cuts[-1]["path"]))
+        # Use a separate FFmpeg process here too: thumbnail extraction must
+        # never load the crash-prone OpenCV videoio DLL into the GUI process.
+        import io
+        seek_time=max(0.,cuts[-1]["end"]-2)
+        thumb_command=[ff,"-hide_banner","-loglevel","error","-nostdin",
+                       "-ss",f"{seek_time:.3f}","-i",str(cuts[-1]["path"]),
+                       "-frames:v","1","-f","image2pipe","-c:v","png","pipe:1"]
         try:
-            cap.set(cv2.CAP_PROP_POS_MSEC,max(0.,cuts[-1]["end"]-2)*1000)
-            success,frame=cap.read()
-        finally:
-            cap.release()
-        if not success:
-            raise RuntimeError("Could not extract the completed-run thumbnail frame")
-        art=Image.fromarray(cv2.cvtColor(frame,cv2.COLOR_BGR2RGB))
+            still_data=subprocess.run(
+                thumb_command,stdin=subprocess.DEVNULL,
+                capture_output=True,timeout=45,
+                creationflags=_cazy_subprocess_flags())
+        except (OSError,subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("Could not extract the completed-run thumbnail: "+str(exc)) from exc
+        if still_data.returncode or not still_data.stdout:
+            reason=still_data.stderr.decode("utf-8","replace")[-1000:].strip()
+            raise RuntimeError("FFmpeg thumbnail extraction failed "
+                               f"(0x{still_data.returncode & 0xffffffff:08X}): "+reason)
+        try:
+            with Image.open(io.BytesIO(still_data.stdout)) as thumbnail:
+                art=thumbnail.convert("RGB")
+        except (OSError,ValueError) as exc:
+            raise RuntimeError("Could not decode completed-run thumbnail PNG") from exc
         art.thumbnail((1280,720))
         canvas=Image.new("RGB",(1280,720),"#101525")
         canvas.paste(art,((1280-art.width)//2,(720-art.height)//2))
