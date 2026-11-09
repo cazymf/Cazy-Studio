@@ -1942,7 +1942,8 @@ def scan_abyss_recording(path,references=None,progress=None,cancel=None,
 
     No cv2.VideoCapture is executed in this OCR path. Decoder access violations
     are contained in the child process; alternate installed FFmpeg builds are
-    tried when the primary decoder fails.
+    tried when the primary decoder fails. read_abyss_frame_text remains the
+    normal recognition method inside _cazy_scan_abyss_external.
     """
     footage = Path(path)
     if not footage.is_file():
