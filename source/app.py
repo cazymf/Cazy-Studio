@@ -2476,6 +2476,9 @@ class MusicHunterWindow(tk.Toplevel):
         controls.columnconfigure(0,weight=1)
         tk.Label(self,text='Songs are sorted by verified upload date; a recent upload may be an older composition.',
                  font=('Segoe UI',9),fg=YELLOW,bg=BG).pack(anchor='w',padx=21,pady=(4,8))
+        tk.Label(self,textvariable=self.status_var,bg=BG,fg=ACCENT2,
+                 font=('Segoe UI',9),anchor='w',wraplength=890,
+                 justify='left').pack(fill='x',padx=20,pady=(0,6))
         table_frame=tk.Frame(self,bg=BG)
         table_frame.pack(fill='both',expand=True,padx=20)
         self.table=ttk.Treeview(table_frame,
@@ -2521,9 +2524,7 @@ class MusicHunterWindow(tk.Toplevel):
                  command=self.download,bg=ACCENT,fg='#101019',relief='flat',
                  font=('Segoe UI',10,'bold'),padx=10,pady=9)
         self.download_button.pack(fill='x',padx=20,pady=(9,7))
-        tk.Label(self,textvariable=self.status_var,bg=BG,fg=ACCENT2,
-                 font=('Segoe UI',9),anchor='w',wraplength=870,
-                 justify='left').pack(fill='x',padx=20,pady=(0,12))
+
         self.after(150,self._poll)
 
     def _set_busy(self,busy):
