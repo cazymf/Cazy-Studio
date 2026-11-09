@@ -1232,6 +1232,37 @@ def _autodirector_prepare(state,chooser=None):
     return count
 
 
+def _autodirector_choose_export_music(state, source='', chooser=None):
+    """Select one track at export time, not just during Assign Music.
+
+    The Full Run receives exactly one track, looped across the assembled MP4.
+    Existing no-music projects still render without music when no music folder
+    has ever been selected.
+    """
+    if state.get('random_music',False):
+        folder=state.get('music_folder','')
+        if not folder:
+            return ''
+        tracks=_autodirector_tracks(folder)
+        if not tracks:
+            raise ValueError(
+                'Random background music is enabled, but no supported audio '
+                'tracks were found in the selected folder:\n'+str(folder)+
+                '\nChoose a folder containing MP3/WAV/M4A/FLAC tracks '
+                'or disable Random song for each video.')
+        last=state.get('recent_music','')
+        candidates=([track for track in tracks if track!=last]
+                    if state.get('avoid_repeats',False) and len(tracks)>1
+                    else tracks)
+        return (chooser or random.choice)(candidates)
+    # Preserve older explicit/prepared assignments when random mode is disabled.
+    if source:
+        return next((job.get('music','') for job in state.get('queue',())
+                     if job.get('path')==source and job.get('music','')), '')
+    return next((job.get('music','') for job in state.get('queue',())
+                 if job.get('music','')), '')
+
+
 class AutoDirectorView(tk.Frame):
     """Simple, explicit local video selection for the AutoDirector pipeline.
 
@@ -1936,17 +1967,26 @@ class AutoDirectorView(tk.Frame):
         folder = filedialog.askdirectory(parent=self,title='Choose a local folder for finished video + thumbnail + title')
         if not folder:
             return
+        if not self.save():
+            return
+        source = result['path']
+        try:
+            assigned = _autodirector_choose_export_music(self.state, source)
+        except ValueError as exc:
+            messagebox.showerror('AutoDirector music',str(exc),parent=self)
+            return
         if not messagebox.askyesno('Confirm local render',
             f'Cut: {start:.1f}s → {end:.1f}s\n'
             f'Preset: {preset or "Use last-used settings"}\n'
+            f'Music: {Path(assigned).name if assigned else "None"}\n'
             f'Destination: {folder}\n\n'
             'Render locally? Your original video is unchanged; nothing is uploaded.',
             parent=self):
             return
-        self.save()
-        source = result['path']
-        assigned = next((j.get('music','') for j in self.state['queue']
-                         if j['path'] == source), '')
+        if self.state.get('random_music') and assigned:
+            self.state['recent_music']=assigned
+            if not self.save():
+                return
         selection = table.selection()
         matched_time = (result['candidates'][int(selection[0])]['at']
                         if selection else None)
@@ -2388,17 +2428,27 @@ class AutoDirectorView(tk.Frame):
             except (ValueError,OSError) as exc:
                 messagebox.showerror('Full Run',str(exc),parent=win)
                 return
+            if not self.save():
+                return
+            try:
+                music=_autodirector_choose_export_music(self.state)
+            except ValueError as exc:
+                messagebox.showerror('AutoDirector music',str(exc),parent=win)
+                return
             folder=filedialog.askdirectory(parent=win,title='Where should the ONE finished Full Run video go?')
             if not folder:return
             if not messagebox.askyesno('Export ONE Full Run',
                 f'Join {len(accepted)} halves from {len(set(x["path"] for x in accepted))} recordings.\n'
                 f'Preset: {preset or "Use last-used settings"}\n'
+                f'Music: {Path(music).name if music else "None"}\n'
                 f'ONE finished MP4 + thumbnail + title.\n\n'
                 'Render now? Your original files will remain untouched.',
                 parent=win):
                 return
-            music=next((j.get('music','') for j in self.state['queue']
-                        if j.get('music')), '')
+            if self.state.get('random_music') and music:
+                self.state['recent_music']=music
+                if not self.save():
+                    return
             self._auto_busy=True
             self._auto_cancel.clear()
             self._begin_auto_render(
