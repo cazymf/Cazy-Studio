@@ -1932,7 +1932,8 @@ def _cazy_scan_abyss_external(path, executable, decoder, progress, cancel,
     counts = {kind: sum(item.get('kind') == kind for item in events)
               for kind in REFERENCE_KINDS}
     return {'path': str(footage), 'duration': duration,
-            'ocr_available': True, 'detection_method': 'Local text OCR (external decoder)',
+            'ocr_available': True, 'detection_method': 'Local text OCR',
+            'decoder_backend': 'External FFmpeg process',
             'events': events, 'event_counts': counts, **output}
 
 
