@@ -2452,3 +2452,70 @@ def music_hunter_import(url,destination,progress=None):
         shutil.move(str(output),str(target))
         if progress:progress('Saved to library: '+target.name)
         return str(target)
+
+
+def music_hunter_library_path():
+    """Cazy Studio's persistent music library, safe from application updates."""
+    local=os.environ.get('LOCALAPPDATA')
+    return Path(local)/'CazyStudio'/'Music' if local else Path.home()/'.cazy_studio'/'Music'
+
+
+def _music_hunter_video_id(url):
+    """Use a verified YouTube video ID to avoid redundant imports."""
+    from urllib.parse import urlsplit,parse_qs
+    parsed=urlsplit(str(url or '').strip())
+    if parsed.scheme!='https':
+        raise ValueError('Expected an HTTPS YouTube video URL.')
+    hostname=(parsed.hostname or '').lower()
+    if hostname in ('youtube.com','www.youtube.com','m.youtube.com','music.youtube.com'):
+        video_id=(parse_qs(parsed.query).get('v') or [''])[0]
+    elif hostname=='youtu.be':
+        video_id=parsed.path.strip('/').split('/')[0]
+    else:
+        raise ValueError('Expected a YouTube video URL.')
+    if not re.fullmatch(r'[A-Za-z0-9_-]{11}',video_id):
+        raise ValueError('Video link does not include a valid YouTube ID.')
+    return video_id
+
+
+def music_hunter_import_batch(urls,destination=None,progress=None,cancel=None):
+    """Convert selected permission-granted tracks to MP3 in the music library.
+
+    Failed files are reported but do not prevent other selected tracks from
+    importing. Existing tracks are matched by YouTube ID and never duplicated.
+    """
+    urls=list(urls)
+    if not 1<=len(urls)<=50:
+        raise ValueError('Select between 1 and 50 tracks to import.')
+    folder=Path(destination).expanduser() if destination else music_hunter_library_path()
+    folder.mkdir(parents=True,exist_ok=True)
+    downloaded=[]
+    skipped=[]
+    failed=[]
+    seen=set()
+    for number,url in enumerate(urls,1):
+        if cancel is not None and cancel.is_set():
+            break
+        try:
+            video_id=_music_hunter_video_id(url)
+            if video_id in seen:
+                skipped.append({'url':url,'reason':'Already selected in this batch'})
+                if progress:progress(number,len(urls),'Skipped duplicate selection')
+                continue
+            seen.add(video_id)
+            existing=next((p for p in folder.glob('*.mp3') if re.search(
+                r' - '+re.escape(video_id)+r'(?: \(\d+\))?$',p.stem)),None)
+            if existing:
+                skipped.append({'url':url,'reason':'Already in library: '+existing.name})
+                if progress:progress(number,len(urls),'Already in library: '+existing.name)
+                continue
+            if progress:progress(number,len(urls),'Downloading and converting '+video_id+'…')
+            output=music_hunter_import(url,folder)
+            downloaded.append(str(output))
+            if progress:progress(number,len(urls),'Imported '+Path(output).name)
+        except Exception as exc:
+            failed.append({'url':str(url),'error':str(exc)})
+            if progress:progress(number,len(urls),'Failed: '+str(exc)[:125])
+    return {'downloaded':downloaded,'skipped':skipped,'failed':failed,
+            'cancelled':bool(cancel is not None and cancel.is_set()),
+            'total':len(urls),'library':str(folder)}
