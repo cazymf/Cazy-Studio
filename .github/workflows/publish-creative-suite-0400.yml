@@ -128,3 +128,5 @@ jobs:
 # CI revision 2: independent larger frame-preview window keeps controls visible.
 
 # Suite CI revision 2: correct Thumbnail Studio test argument syntax.
+
+# Suite CI revision 3: reserve the Creative Lab footer before expanding tabs.
