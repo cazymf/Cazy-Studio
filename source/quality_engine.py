@@ -2273,7 +2273,6 @@ def _music_hunter_candidates(yt_dlp,query,limit,progress=None):
           'extract_flat':'in_playlist','skip_download':True,
           'socket_timeout':15,'retries':1,'extractor_retries':1}
     for phrase in phrases:
-        if len(collected)>=max(40,limit*5):break
         count=min(50,max(30,limit*5))
         if progress:progress('Searching YouTube: '+phrase[:75])
         try:
@@ -2290,7 +2289,7 @@ def _music_hunter_candidates(yt_dlp,query,limit,progress=None):
             if not re.fullmatch(r'[A-Za-z0-9_-]{11}',ident):
                 url=str(item.get('webpage_url') or item.get('url') or '')
                 parsed=urlsplit(url)
-                if parsed.hostname in ('youtube.com','www.youtube.com','m.youtube.youtube.com','m.youtube.com'):
+                if parsed.hostname in ('youtube.com','www.youtube.com','m.youtube.com'):
                     ident=(parse_qs(parsed.query).get('v') or [''])[0]
                 elif parsed.hostname=='youtu.be':
                     ident=parsed.path.strip('/')
