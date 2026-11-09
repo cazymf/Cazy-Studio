@@ -2438,20 +2438,27 @@ class MusicHunterWindow(tk.Toplevel):
         super().__init__(owner)
         self.owner=owner
         self.title('Cazy Music Hunter — Fresh Battle Music (Beta)')
-        self.geometry('950x650')
-        self.minsize(710,520)
+        self.geometry('1080x780')
+        self.minsize(830,650)
         self.configure(bg=BG)
         self.transient(owner.winfo_toplevel())
         self.query_var=tk.StringVar(value='epic orchestral boss battle instrumental copyright free')
         self.months_var=tk.StringVar(value='6')
-        default=Path(os.environ.get('LOCALAPPDATA') or str(Path.home()))/'CazyStudio'/'Music'
-        self.folder_var=tk.StringVar(value=owner.music_var.get() or str(default))
+        default=quality_engine.music_hunter_library_path()
+        self.folder_var=tk.StringVar(value=str(default))
         self.status_var=tk.StringVar(value='Ready. Results are recent uploads; music rights must be verified.')
         self.permission_var=tk.BooleanVar(value=False)
         self.pasted_url_var=tk.StringVar(value='')
         self._busy=False
         self._results=[]
         self._messages=queue.Queue()
+        self._batch_cancel=threading.Event()
+        self.progress_var=tk.DoubleVar(value=0.0)
+        self.selected_count_var=tk.StringVar(value='0 tracks selected')
+        # Reserve the entire download/action panel BEFORE the expanding song table.
+        # This keeps the big MP3 button visible even on shorter displays.
+        self.footer=tk.Frame(self,bg=BG)
+        self.footer.pack(side='bottom',fill='x',padx=18,pady=(4,8))
         top=tk.Frame(self,bg=BG)
         top.pack(fill='x',padx=20,pady=(18,8))
         tk.Label(top,text='♫ MUSIC HUNTER',font=('Segoe UI',18,'bold'),
@@ -2482,7 +2489,7 @@ class MusicHunterWindow(tk.Toplevel):
         table_frame=tk.Frame(self,bg=BG)
         table_frame.pack(fill='both',expand=True,padx=20)
         self.table=ttk.Treeview(table_frame,
-              columns=('date','song','creator','rights'),show='headings',selectmode='browse')
+              columns=('date','song','creator','rights'),show='headings',selectmode='extended')
         for col,label,width in (
             ('date','UPLOADED',105),('song','SONG',360),
             ('creator','CHANNEL',150),('rights','LICENSE INFO',200)):
@@ -2493,25 +2500,33 @@ class MusicHunterWindow(tk.Toplevel):
         sb.pack(side='right',fill='y')
         self.table.configure(yscrollcommand=sb.set)
         self.table.bind('<Double-1>',lambda event:self.preview())
-        actions=tk.Frame(self,bg=BG)
+        self.table.bind('<<TreeviewSelect>>',lambda event:self._update_selection())
+        actions=tk.Frame(self.footer,bg=BG)
         actions.pack(fill='x',padx=20,pady=(10,5))
+        self.select_all_button=tk.Button(actions,text='SELECT ALL SONGS',command=self.select_all,
+                 bg=ACCENT,fg='#101019',font=('Segoe UI',9,'bold'),relief='flat',padx=13,pady=9)
+        self.select_all_button.pack(side='left',padx=(0,8))
+        tk.Button(actions,text='Clear Selection',command=self.clear_selection,
+                 bg=CARD2,fg=TEXT,relief='flat',padx=10,pady=9).pack(side='left',padx=(0,8))
+        tk.Label(actions,textvariable=self.selected_count_var,bg=BG,fg=ACCENT2,
+                 font=('Segoe UI',9,'bold')).pack(side='right',padx=5)
         for label,callback in (
             ('Open Selected Preview',self.preview),
             ('Install / Update Music Tools',self.install_tools)):
             tk.Button(actions,text=label,command=callback,bg=CARD2,fg=TEXT,
                       relief='flat',padx=12,pady=7).pack(side='left',padx=(0,8))
-        link_row=tk.Frame(self,bg=BG)
+        link_row=tk.Frame(self.footer,bg=BG)
         link_row.pack(fill='x',padx=20,pady=(3,3))
         tk.Label(link_row,text='Or paste video URL:',bg=BG,fg=MUTED).pack(side='left')
         tk.Entry(link_row,textvariable=self.pasted_url_var,bg=CARD2,fg=TEXT,
                  insertbackground=TEXT,relief='flat').pack(side='left',fill='x',expand=True,padx=8,ipady=6)
-        self.permission_check=tk.Checkbutton(self,
+        self.permission_check=tk.Checkbutton(self.footer,
             text='I own this track or have permission to download and reuse the selected audio.',
             variable=self.permission_var,bg=BG,fg=TEXT,activebackground=BG,
             activeforeground=TEXT,selectcolor=CARD2,anchor='w',
             font=('Segoe UI',9))
         self.permission_check.pack(anchor='w',padx=20,pady=(5,4))
-        folder_row=tk.Frame(self,bg=BG)
+        folder_row=tk.Frame(self.footer,bg=BG)
         folder_row.pack(fill='x',padx=20)
         tk.Label(folder_row,text='MP3 library:',bg=BG,fg=MUTED).pack(side='left')
         tk.Entry(folder_row,textvariable=self.folder_var,
@@ -2520,10 +2535,17 @@ class MusicHunterWindow(tk.Toplevel):
                                                    expand=True,padx=8,ipady=5)
         tk.Button(folder_row,text='Choose Folder',command=self.choose_folder,
                   bg=CARD2,fg=TEXT,relief='flat',padx=9,pady=6).pack(side='left')
-        self.download_button=tk.Button(self,text='DOWNLOAD AUTHORIZED AUDIO → MP3 → ADD TO LIBRARY',
+        self.download_button=tk.Button(self.footer,text='⬇ DOWNLOAD ALL SELECTED → MP3 → CAZY MUSIC FOLDER',
                  command=self.download,bg=ACCENT,fg='#101019',relief='flat',
-                 font=('Segoe UI',10,'bold'),padx=10,pady=9)
-        self.download_button.pack(fill='x',padx=20,pady=(9,7))
+                 font=('Segoe UI',12,'bold'),padx=14,pady=14)
+        self.download_button.pack(fill='x',padx=6,pady=(9,4),ipady=4)
+        self.progress_bar=ttk.Progressbar(self.footer,orient='horizontal',
+                 maximum=100,mode='determinate',variable=self.progress_var)
+        self.progress_bar.pack(fill='x',padx=6,pady=(1,4),ipady=3)
+        self.cancel_batch_button=tk.Button(self.footer,text='STOP AFTER CURRENT SONG',
+                 command=self.cancel_import,bg=CARD2,fg=TEXT,relief='flat',pady=7,
+                 state='disabled')
+        self.cancel_batch_button.pack(fill='x',padx=6,pady=(1,0))
 
         self.after(150,self._poll)
 
@@ -2532,12 +2554,35 @@ class MusicHunterWindow(tk.Toplevel):
         state='disabled' if busy else 'normal'
         self.search_button.configure(state=state)
         self.download_button.configure(state=state)
+        self.select_all_button.configure(state=state)
+        self.cancel_batch_button.configure(state='normal' if busy else 'disabled')
 
     def _selected(self):
         selection=self.table.selection()
         if not selection:return None
         index=int(selection[0])
         return self._results[index] if 0<=index<len(self._results) else None
+
+    def _selected_items(self):
+        indices=sorted(int(i) for i in self.table.selection())
+        return [self._results[i] for i in indices if 0<=i<len(self._results)]
+
+    def _update_selection(self):
+        count=len(self._selected_items())
+        self.selected_count_var.set(f'{count} song'+('s' if count!=1 else '')+' selected')
+
+    def select_all(self):
+        items=self.table.get_children()
+        if items:self.table.selection_set(*items)
+        self._update_selection()
+
+    def clear_selection(self):
+        self.table.selection_remove(*self.table.selection())
+        self._update_selection()
+
+    def cancel_import(self):
+        self._batch_cancel.set()
+        self.status_var.set('Stopping after the current MP3 conversion finishes…')
 
     def _work(self,kind,action):
         if self._busy:return
@@ -2592,25 +2637,29 @@ class MusicHunterWindow(tk.Toplevel):
         self._work('installed',install)
 
     def download(self):
-        item=self._selected()
-        url=self.pasted_url_var.get().strip() or (item['url'] if item else '')
-        if not url:
+        pasted=self.pasted_url_var.get().strip()
+        urls=[pasted] if pasted else [item['url'] for item in self._selected_items()]
+        if not urls:
             messagebox.showinfo('Music Hunter',
-                'Choose a search result or paste a YouTube video URL.',parent=self)
+                'Click SELECT ALL SONGS, choose specific rows, or paste a YouTube video URL.',
+                parent=self)
             return
         if not self.permission_var.get():
             messagebox.showinfo('Music Hunter',
-                'Confirm that you own the selected music or have permission to download and reuse it.',
+                'Confirm that you own these songs or have permission to download and reuse them.',
                 parent=self)
             return
         folder=self.folder_var.get()
         if not folder:
             messagebox.showinfo('Music Hunter','Choose a music library folder.',parent=self)
             return
-        self.status_var.set('Importing selected audio…')
-        self._work('download',lambda:quality_engine.music_hunter_import(
-            url,folder,
-            progress=lambda message:self._messages.put(('progress',message))))
+        self._batch_cancel.clear()
+        self.progress_var.set(0)
+        self.status_var.set(f'Preparing {len(urls)} selected MP3 import(s)…')
+        self._work('batch',lambda:quality_engine.music_hunter_import_batch(
+            urls,folder,cancel=self._batch_cancel,
+            progress=lambda i,n,message:self._messages.put(
+                ('batch_progress',(i,n,message)))))
 
     def _poll(self):
         if not self.winfo_exists():return
@@ -2620,6 +2669,11 @@ class MusicHunterWindow(tk.Toplevel):
                 if kind=='progress':
                     self.status_var.set(str(data))
                     continue
+                if kind=='batch_progress':
+                    number,total,message=data
+                    self.progress_var.set(100*number/max(total,1))
+                    self.status_var.set(f'{number}/{total} · {message}')
+                    continue
                 self._set_busy(False)
                 if kind=='search':
                     report=data if isinstance(data,dict) else {'results':data}
@@ -2628,15 +2682,29 @@ class MusicHunterWindow(tk.Toplevel):
                         self.table.insert('',tk.END,iid=str(i),values=(
                             item['upload_date'],item['title'],
                             item['channel'],item['license']))
+                    self.select_all()
                     self.status_var.set(str(report.get('message') or
                         f'{len(self._results)} recent tracks discovered.'))
-                elif kind=='download':
-                    self.owner.music_var.set(self.folder_var.get())
+                elif kind=='batch':
+                    folder=data['library']
+                    self.owner.music_var.set(folder)
                     self.owner.save()
                     self.owner.refresh()
-                    self.status_var.set('MP3 added to AutoDirector library: '+Path(data).name)
-                    messagebox.showinfo('Music Hunter',
-                        'MP3 saved to AutoDirector music library:\n'+str(data),parent=self)
+                    downloaded=len(data['downloaded'])
+                    skipped=len(data['skipped'])
+                    failed=len(data['failed'])
+                    self.progress_var.set(100 if not data['cancelled'] else self.progress_var.get())
+                    summary=(f'{downloaded} MP3(s) added • {skipped} already present/duplicate'
+                             f' • {failed} failed.'+
+                             (' Stopped early.' if data['cancelled'] else ''))
+                    self.status_var.set(summary+'\nFolder: '+folder)
+                    if failed:
+                        details='\n'.join(x['error'][:120] for x in data['failed'][:3])
+                        messagebox.showwarning('Music Hunter Import',
+                            summary+'\n\n'+details,parent=self)
+                    else:
+                        messagebox.showinfo('Music Hunter Import',
+                            summary+'\n\nSaved to: '+folder,parent=self)
                 elif kind=='installed':
                     self.status_var.set(str(data))
                 elif kind=='error':
