@@ -109,3 +109,5 @@ jobs:
 # CI revision 2: enable optional YouTube music feature without altering local video source guarantees.
 
 # CI revision 2: updated batch destination persistence assertion.
+
+# CI revision 3: visible Tk root in transient Music Hunter GUI smoke.
