@@ -3177,4 +3177,9 @@ def creative_bug_report_path(destination,title='Cazy Studio Test Notes'):
     folder.mkdir(parents=True,exist_ok=True)
     base=re.sub(r'[^A-Za-z0-9_-]','_',str(title)).strip('_')[:64] or 'Cazy_Bugs'
     date=datetime.now().strftime('%Y%m%d_%H%M%S')
-    return folder/(f'{base}_{date}.md')
+    candidate=folder/(f'{base}_{date}.md')
+    number=2
+    while candidate.exists():
+        candidate=folder/(f'{base}_{date}_{number}.md')
+        number+=1
+    return candidate
