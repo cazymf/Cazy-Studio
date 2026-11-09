@@ -97,3 +97,4 @@ jobs:
           name: Cazy_Studio_v0_3_24_Update
           path: /tmp/cazy324/out/Cazy_Studio_v0_3_24_Update.zip
           if-no-files-found: error
+# Pipeline revision 2: preserve established OCR result fields while isolating videoio.
