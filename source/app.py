@@ -2448,6 +2448,7 @@ class MusicHunterWindow(tk.Toplevel):
         self.folder_var=tk.StringVar(value=owner.music_var.get() or str(default))
         self.status_var=tk.StringVar(value='Ready. Results are recent uploads; music rights must be verified.')
         self.permission_var=tk.BooleanVar(value=False)
+        self.pasted_url_var=tk.StringVar(value='')
         self._busy=False
         self._results=[]
         self._messages=queue.Queue()
@@ -2496,6 +2497,11 @@ class MusicHunterWindow(tk.Toplevel):
             ('Install / Update Music Tools',self.install_tools)):
             tk.Button(actions,text=label,command=callback,bg=CARD2,fg=TEXT,
                       relief='flat',padx=12,pady=7).pack(side='left',padx=(0,8))
+        link_row=tk.Frame(self,bg=BG)
+        link_row.pack(fill='x',padx=20,pady=(3,3))
+        tk.Label(link_row,text='Or paste video URL:',bg=BG,fg=MUTED).pack(side='left')
+        tk.Entry(link_row,textvariable=self.pasted_url_var,bg=CARD2,fg=TEXT,
+                 insertbackground=TEXT,relief='flat').pack(side='left',fill='x',expand=True,padx=8,ipady=6)
         self.permission_check=tk.Checkbutton(self,
             text='I own this track or have permission to download and reuse the selected audio.',
             variable=self.permission_var,bg=BG,fg=TEXT,activebackground=BG,
@@ -2586,8 +2592,10 @@ class MusicHunterWindow(tk.Toplevel):
 
     def download(self):
         item=self._selected()
-        if not item:
-            messagebox.showinfo('Music Hunter','Select a song first.',parent=self)
+        url=self.pasted_url_var.get().strip() or (item['url'] if item else '')
+        if not url:
+            messagebox.showinfo('Music Hunter',
+                'Choose a search result or paste a YouTube video URL.',parent=self)
             return
         if not self.permission_var.get():
             messagebox.showinfo('Music Hunter',
@@ -2600,7 +2608,7 @@ class MusicHunterWindow(tk.Toplevel):
             return
         self.status_var.set('Importing selected audio…')
         self._work('download',lambda:quality_engine.music_hunter_import(
-            item['url'],folder,
+            url,folder,
             progress=lambda message:self._messages.put(('progress',message))))
 
     def _poll(self):
