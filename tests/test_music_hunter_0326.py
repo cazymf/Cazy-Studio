@@ -35,7 +35,9 @@ class FakeYT:
         return False
 
     def extract_info(self,url,download=False):
-        if url.startswith('ytsearchdate'):
+        if url.startswith('ytsearch'):
+            if url.startswith('ytsearchdate'):
+                raise AssertionError('Removed ytsearchdate command called')
             return {'entries':[{'id':key,'url':'https://www.youtube.com/watch?v='+key}
                                for key in self.data]}
         item=self.data[url.split('v=')[-1]]
@@ -76,10 +78,49 @@ class MusicHunterTests(unittest.TestCase):
         self.assertIn('Not verified',found[0]['license'])
         self.assertEqual(found[1]['license'],'Creative Commons Attribution')
 
+    def test_diagnostics_when_every_song_is_old(self):
+        data={'AAAAAAAAAAA':{'id':'AAAAAAAAAAA','title':'Old Epic Boss Song',
+               'upload_date':date_ago(2000),'uploader':'Old Channel'}}
+        with mock.patch.object(quality,'_music_hunter_ytdlp',return_value=FakeYT(data)):
+            report=quality.music_hunter_search('epic orchestral music',months=6,
+                                               return_report=True)
+        self.assertEqual(report['results'],[])
+        self.assertEqual(report['stats']['old'],1)
+        self.assertIn('1 too old',report['message'])
+        self.assertEqual(report['stats']['candidate_count'],1)
+
+    def test_video_search_works_without_removed_date_sort_extractor(self):
+        data={'AAAAAAAAAAA':{'id':'AAAAAAAAAAA','title':'Brand New Soundtrack',
+               'upload_date':date_ago(5),'uploader':'Creator'}}
+        calls=[]
+        class LogYT(FakeYT):
+            def YoutubeDL(self,opts):
+                return self
+            def extract_info(self,url,download=False):
+                calls.append(url)
+                return super().extract_info(url,download=download)
+        with mock.patch.object(quality,'_music_hunter_ytdlp',return_value=LogYT(data)):
+            report=quality.music_hunter_search('boss theme music',return_report=True)
+        self.assertEqual(len(report['results']),1)
+        self.assertTrue(any(x.startswith('ytsearch') for x in calls))
+        self.assertFalse(any(x.startswith('ytsearchdate') for x in calls))
+        self.assertEqual(report['results'][0]['title'],'Brand New Soundtrack')
+
+    def test_metadata_errors_are_explained_when_only_undated_results_exist(self):
+        data={'AAAAAAAAAAA':{'id':'AAAAAAAAAAA','title':'Undated Song',
+               'uploader':'Creator'}}
+        with mock.patch.object(quality,'_music_hunter_ytdlp',return_value=FakeYT(data)):
+            report=quality.music_hunter_search('battle music',return_report=True)
+        self.assertEqual(report['results'],[])
+        self.assertIn('1 undated',report['message'])
+        self.assertIn('Try a shorter query',report['message'])
+
     def test_window_selection_and_direct_url_paths_present(self):
         app=(ROOT/'source'/'app.py').read_text(encoding='utf-8')
         self.assertIn('♫ MUSIC HUNTER (BETA)',app)
         self.assertIn('class MusicHunterWindow(',app)
+        self.assertIn('return_report=True',app)
+        self.assertIn("report.get('message')",app)
         self.assertIn('Or paste video URL:',app)
         self.assertIn('self.permission_var.get()',app)
         self.assertIn("self.owner.music_var.set(self.folder_var.get())",app)
