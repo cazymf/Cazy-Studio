@@ -107,7 +107,7 @@ class AutoDirectorTests(unittest.TestCase):
         self.assertIn('Music Hunter is an optional online tool; no publishing.', ui)
 
     def test_version_bump_and_valid_python_ast(self):
-        self.assertIn("'0.3.26'", VERSION.read_text(encoding='utf-8'))
+        self.assertIn("'0.3.27'", VERSION.read_text(encoding='utf-8'))
         ast.parse(SOURCE.read_text(encoding='utf-8'))
 
 
