@@ -102,3 +102,5 @@ jobs:
           path: /tmp/cazy326/out/Cazy_Studio_v0_3_26_Update.zip
           if-no-files-found: error
 # Automated release for the first incremental music discovery feature.
+
+# CI revision 2: enable optional YouTube music feature without altering local video source guarantees.
