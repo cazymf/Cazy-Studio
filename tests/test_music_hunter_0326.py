@@ -123,7 +123,7 @@ class MusicHunterTests(unittest.TestCase):
         self.assertIn("report.get('message')",app)
         self.assertIn('Or paste video URL:',app)
         self.assertIn('self.permission_var.get()',app)
-        self.assertIn("self.owner.music_var.set(self.folder_var.get())",app)
+        self.assertIn("self.owner.music_var.set(folder)",app)
 
     def test_batch_select_all_skips_existing_tracks(self):
         with tempfile.TemporaryDirectory() as folder:
