@@ -126,3 +126,5 @@ jobs:
 # CI revision 3: visible Tk root in transient Music Hunter GUI smoke.
 
 # CI revision 2: independent larger frame-preview window keeps controls visible.
+
+# Suite CI revision 2: correct Thumbnail Studio test argument syntax.
