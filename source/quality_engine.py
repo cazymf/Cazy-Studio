@@ -2260,73 +2260,133 @@ def _music_hunter_ytdlp():
     return yt_dlp
 
 
-def music_hunter_search(query,months=6,limit=10,progress=None):
-    """Search YouTube by newest upload, verify dates, and exclude older results.
+def _music_hunter_candidates(yt_dlp,query,limit,progress=None):
+    """Search with supported ytsearch; ytsearchdate was removed in 2026."""
+    import datetime
+    from urllib.parse import urlsplit,parse_qs
+    year=datetime.datetime.now(datetime.timezone.utc).year
+    phrases=[query+' '+str(year),query]
+    seen=set()
+    collected=[]
+    attempts=[]
+    opts={'quiet':True,'no_warnings':True,'ignoreerrors':True,
+          'extract_flat':'in_playlist','skip_download':True,
+          'socket_timeout':15,'retries':1,'extractor_retries':1}
+    for phrase in phrases:
+        if len(collected)>=max(40,limit*5):break
+        count=min(50,max(30,limit*5))
+        if progress:progress('Searching YouTube: '+phrase[:75])
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                found=ydl.extract_info(f'ytsearch{count}:{phrase}',download=False)
+            entries=list((found or {}).get('entries') or [])
+            attempts.append(f'{len(entries)} matches for "{phrase[:55]}"')
+        except Exception as exc:
+            attempts.append('Search failed: '+str(exc)[:180])
+            continue
+        for item in entries:
+            if not isinstance(item,dict):continue
+            ident=str(item.get('id') or '')
+            if not re.fullmatch(r'[A-Za-z0-9_-]{11}',ident):
+                url=str(item.get('webpage_url') or item.get('url') or '')
+                parsed=urlsplit(url)
+                if parsed.hostname in ('youtube.com','www.youtube.com','m.youtube.youtube.com','m.youtube.com'):
+                    ident=(parse_qs(parsed.query).get('v') or [''])[0]
+                elif parsed.hostname=='youtu.be':
+                    ident=parsed.path.strip('/')
+            if not re.fullmatch(r'[A-Za-z0-9_-]{11}',ident) or ident in seen:continue
+            seen.add(ident)
+            collected.append((f'https://www.youtube.com/watch?v={ident}',item))
+    return collected,attempts
 
-    Rules-based ranking, not an LLM or a copyright/permission verifier.
-    """
+
+def music_hunter_search(query,months=6,limit=10,progress=None,return_report=False):
+    """Search and rank by actual verified dates, not assumed search order."""
     query=' '.join(str(query or '').split())
-    if not 3 <= len(query) <= 180:
+    if not 3<=len(query)<=180:
         raise ValueError('Describe the music you want (3–180 characters).')
     limit=max(1,min(12,int(limit)))
     cutoff=_music_hunter_month_cutoff(months)
     yt_dlp=_music_hunter_ytdlp()
-    opts={'quiet':True,'no_warnings':True,'skip_download':True,
-          'ignoreerrors':True,'extract_flat':'in_playlist',
-          'playlistend':min(40,limit*4),'socket_timeout':15,
-          'retries':1,'extractor_retries':1}
-    if progress:progress('Searching recent music on YouTube…')
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            found=ydl.extract_info(
-                f'ytsearchdate{min(40,limit*4)}:{query}',download=False)
-            candidates=list((found or {}).get('entries') or [])
-    except Exception as exc:
-        raise RuntimeError('Music discovery failed: '+str(exc)) from exc
+    candidates,attempts=_music_hunter_candidates(yt_dlp,query,limit,progress)
+    stats={'candidate_count':len(candidates),'checked':0,'old':0,
+           'missing_date':0,'metadata_errors':0,'excluded':0}
+    if not candidates:
+        raise RuntimeError('YouTube returned no usable search candidates. '+
+                           '; '.join(attempts)+
+                           '. Try Install / Update Music Tools or a shorter phrase.')
     results=[]
     tokens=set(re.findall(r'[a-z0-9]{3,}',query.casefold()))
-    with yt_dlp.YoutubeDL(dict(opts,extract_flat=False,noplaylist=True,
-                               playlistend=None)) as ydl:
-        for item in candidates:
+    opts={'quiet':True,'no_warnings':True,'ignoreerrors':True,
+          'skip_download':True,'noplaylist':True,'socket_timeout':12,
+          'retries':0,'extractor_retries':0}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        for address,flat in candidates[:min(75,max(40,limit*6))]:
             if len(results)>=limit:break
-            if not isinstance(item,dict):continue
-            ident=str(item.get('id') or '')
-            address=str(item.get('webpage_url') or item.get('url') or '')
-            if not address.startswith(('https://www.youtube.com/watch?',
-                                       'https://youtube.com/watch?',
-                                       'https://youtu.be/')):
-                if re.fullmatch(r'[A-Za-z0-9_-]{11}',ident):
-                    address='https://www.youtube.com/watch?v='+ident
-                else:continue
-            if progress:progress(f'Checking upload dates: {len(results)}/{limit} matches')
-            try:full=ydl.extract_info(address,download=False) or {}
-            except Exception:continue
-            if not isinstance(full,dict) or full.get('is_live') or full.get('live_status') in ('is_live','is_upcoming'):
+            stats['checked']+=1
+            if progress:
+                progress(f"Checked {stats['checked']}/{len(candidates)} videos · "
+                         f"{len(results)} new · {stats['old']} old · "
+                         f"{stats['missing_date']} undated")
+            try:full=ydl.extract_info(address,download=False)
+            except Exception:full=None
+            if not isinstance(full,dict) or not full:
+                stats['metadata_errors']+=1
+                full=flat
+            if full.get('is_live') or full.get('live_status') in ('is_live','is_upcoming'):
+                stats['excluded']+=1
                 continue
             uploaded=(_music_hunter_date(full.get('upload_date')) or
-                      _music_hunter_date(full.get('release_date')) or
-                      _music_hunter_date(full.get('timestamp')))
-            released=_music_hunter_date(full.get('release_date'))
-            if not uploaded or uploaded<cutoff or (released and released<cutoff):
+                      _music_hunter_date(full.get('timestamp')) or
+                      _music_hunter_date(flat.get('upload_date')) or
+                      _music_hunter_date(flat.get('timestamp')))
+            released=(_music_hunter_date(full.get('release_date')) or
+                      _music_hunter_date(full.get('release_timestamp')))
+            release_year=full.get('release_year')
+            if not uploaded:
+                stats['missing_date']+=1
                 continue
-            title=str(full.get('title') or item.get('title') or '').strip()[:180]
-            if not title:continue
-            duration=float(full.get('duration') or 0)
-            if duration and not 40<=duration<=3600:continue
-            creator=str(full.get('uploader') or full.get('channel') or '')[:100]
-            license_text=str(full.get('license') or '')[:100]
+            if uploaded<cutoff or (released and released<cutoff) or (
+                    release_year and str(release_year).isdigit()
+                    and int(release_year)<cutoff.year):
+                stats['old']+=1
+                continue
+            title=str(full.get('title') or flat.get('title') or '').strip()[:180]
+            if not title:
+                stats['excluded']+=1
+                continue
+            duration=float(full.get('duration') or flat.get('duration') or 0)
+            if duration and not 40<=duration<=3600:
+                stats['excluded']+=1
+                continue
+            creator=str(full.get('uploader') or full.get('channel') or
+                        flat.get('uploader') or flat.get('channel') or '')[:100]
+            license_text=str(full.get('license') or flat.get('license') or '')[:100]
             overlap=len(tokens.intersection(set(re.findall(
                 r'[a-z0-9]{3,}',(title+' '+creator).casefold()))))
             results.append({
-                'title':title,'url':str(full.get('webpage_url') or address),
-                'channel':creator,'upload_date':uploaded.isoformat(),
+                'title':title,'url':address,'channel':creator,
+                'upload_date':uploaded.isoformat(),
                 'release_date':released.isoformat() if released else '',
                 'duration':int(duration) if duration else 0,
                 'license':license_text or 'Not verified — check creator permissions',
-                'match_score':overlap,
-                'original_release_verified':bool(released)})
-    results.sort(key=lambda e:(e['upload_date'],e['match_score']),reverse=True)
-    if progress:progress(f'Found {len(results)} recent songs. Check permissions before importing.')
+                'match_score':overlap,'original_release_verified':bool(released)})
+    results.sort(key=lambda item:(item['upload_date'],item['match_score']),reverse=True)
+    stats['found']=len(results)
+    if results:
+        message=(f"Found {len(results)} recent tracks from {stats['checked']} checked; "
+                 f"{stats['old']} too old, {stats['missing_date']} undated. "
+                 'Verify creator permissions before importing.')
+    else:
+        message=(f"No verified-new songs in these results. Checked {stats['checked']}"
+                 f" of {len(candidates)}: {stats['old']} too old, "
+                 f"{stats['missing_date']} undated, "
+                 f"{stats['metadata_errors']} metadata failures. "
+                 'Try a shorter query, 12 months, or Update Music Tools.')
+    if progress:progress(message)
+    if return_report:
+        return {'results':results,'message':message,'stats':stats,
+                'search_attempts':attempts}
     return results
 
 
