@@ -3133,9 +3133,14 @@ def creative_vsr_ab_preview(source,destination,model,model_dir,weights,
         tmp=Path(scratch)
         sample=tmp/'sample.mp4'
         processed=tmp/'enhanced.mp4'
-        if progress:progress(.05,'Extracting short original sample')
+        if progress:progress(.05,'Extracting bounded 30 FPS model test sample')
+        original=engine.probe(str(source))
+        sample_width=min(640,int(original.width))
+        if sample_width<64:
+            raise ValueError('Source recording is too narrow for VSR comparison.')
         _creative_run([ff,'-hide_banner','-loglevel','error','-y',
                        '-nostdin','-i',str(source),'-t',f'{seconds:.3f}',
+                       '-vf',f'fps=30,scale={sample_width}:-2:flags=lanczos',
                        '-c:v','libx264','-preset','fast','-crf','17',
                        '-an',str(sample)],cancel=cancel,timeout=180)
         if model=='RealBasicVSR':
