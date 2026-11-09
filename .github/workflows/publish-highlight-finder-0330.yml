@@ -1,0 +1,119 @@
+name: Publish Cazy Studio v0.3.30 — Highlight Finder Beta
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-highlight-finder-0330.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OCR, GUI, and media test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg tesseract-ocr tesseract-ocr-eng
+      - name: Verify Highlight Finder, preserved Full Run, music and GUI
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_export_0323.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_music_hunter_0328.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_highlight_0330.py
+      - name: Build and apply ZIP using actual installed v0.3.29 updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy330/base /tmp/cazy330/stage /tmp/cazy330/out
+          gh release download v0.3.29 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_29_Update.zip' --dir /tmp/cazy330/base
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy330/stage/
+          PYTHONPATH=source python - <<'PY'
+          import tempfile,zipfile,importlib.util
+          from pathlib import Path
+          from update_core import build_update_zip
+          root=Path('/tmp/cazy330')
+          previous=root/'base/Cazy_Studio_v0_3_29_Update.zip'
+          update=root/'out/Cazy_Studio_v0_3_30_Update.zip'
+          manifest=build_update_zip(root/'stage',update,'0.3.30')
+          approved={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          assert set(manifest['files'])==approved
+          with tempfile.TemporaryDirectory() as location:
+              folder=Path(location)
+              old_module=folder/'legacy.py'
+              with zipfile.ZipFile(previous) as z:
+                  old_module.write_bytes(z.read('update_core.py'))
+              spec=importlib.util.spec_from_file_location('legacy_updater',old_module)
+              legacy=importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(legacy)
+              assert approved.issubset(legacy.SAFE_FILES)
+              assert set(legacy.inspect_update_zip(update,'0.3.30')['files'])==approved
+              installed=folder/'installation'
+              installed.mkdir()
+              with zipfile.ZipFile(previous) as z:
+                  old_manifest=legacy.inspect_update_zip(previous,'0.3.29')
+                  for filename in old_manifest['files']:
+                      (installed/filename).write_bytes(z.read(filename))
+              legacy.apply_update_zip(update,installed,'0.3.30')
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.30'"
+              assert 'SCAN STATUS: Ready' in (installed/'app.py').read_text()
+              assert 'RENDER COMPLETE — 100%' in (installed/'app.py').read_text()
+              assert 'NVENC API' in (installed/'quality_engine.py').read_text()
+              assert 'last_render_error.log' in (installed/'quality_engine.py').read_text()
+              assert "'Error Log'" in (installed/'app.py').read_text()
+              assert "'REVIEW SAVED CUTS'" in (installed/'app.py').read_text()
+              assert '_autodirector_load_scan_cache' in (installed/'app.py').read_text()
+              assert 'self.export_window.lift()' in (installed/'app.py').read_text()
+              assert 'Live Render Progress' in (installed/'quality_ui.py').read_text()
+              assert 'def _cazy_ocr_frame_stream(' in (installed/'quality_engine.py').read_text()
+              assert 'class _CazyOCRDecoderFailure' in (installed/'quality_engine.py').read_text()
+              assert 'def music_hunter_search(' in (installed/'quality_engine.py').read_text()
+              assert 'def music_hunter_import(' in (installed/'quality_engine.py').read_text()
+              assert 'class MusicHunterWindow(' in (installed/'app.py').read_text()
+              assert '♫ MUSIC HUNTER (BETA)' in (installed/'app.py').read_text()
+              assert 'def _autodirector_choose_export_music(' in (installed/'app.py').read_text()
+              assert 'def highlight_finder_scan(' in (installed/'quality_engine.py').read_text()
+              assert 'def export_highlight_clips(' in (installed/'quality_engine.py').read_text()
+              assert 'class HighlightFinderWindow(' in (installed/'app.py').read_text()
+              assert '✦ HIGHLIGHT FINDER (BETA)' in (installed/'app.py').read_text()
+              assert 'def music_hunter_import_batch(' in (installed/'quality_engine.py').read_text()
+              assert '⬇ DOWNLOAD ALL SELECTED → MP3 → CAZY MUSIC FOLDER' in (installed/'app.py').read_text()
+              legacy.rollback_latest(installed)
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.29'"
+          print('v0.3.29 updater installed/rolled back v0.3.30: PASS')
+          PY
+      - name: Publish verified Highlight Finder beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /tmp/cazy330/out
+          if gh release view v0.3.30 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.30 Cazy_Studio_v0_3_30_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.30 Cazy_Studio_v0_3_30_Update.zip \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.3.30 — Highlight Finder Beta' \
+              --notes 'Adds Highlight Finder Beta: an independent visual-activity analyzer for local gameplay recordings, ranking likely exciting moments using motion and image detail. Choose any video, review confidence-like activity scores and timestamps, preview still frames, select highlights, and export separate MP4 clips without altering the original recording or Full Run. Uses the existing isolated FFmpeg decoder to keep native video codec crashes out of the GUI; scanning shows progress and supports cancellation. This is visual scoring, NOT a trained neural model and cannot yet recognize Genshin bursts, dodges, damage numbers or game mechanics. The existing Abyss text OCR and successful one-MP4 Full Run renderer are unchanged, as requested. Preserves Music Hunter, random background music, NVENC, Quality Lab, saved cuts and presets. Automated tests, GUI smoke including preview and shorter-window controls, and v0.3.29 updater installation/rollback are required before release; confirm real-video behavior on Windows.'
+          fi
+          gh release edit v0.3.30 --repo "$GITHUB_REPOSITORY" --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_30_Update
+          path: /tmp/cazy330/out/Cazy_Studio_v0_3_30_Update.zip
+          if-no-files-found: error
+# Automated release for the first incremental music discovery feature.
+
+# CI revision 2: enable optional YouTube music feature without altering local video source guarantees.
+
+# CI revision 2: updated batch destination persistence assertion.
+
+# CI revision 3: visible Tk root in transient Music Hunter GUI smoke.
