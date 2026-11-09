@@ -2701,3 +2701,367 @@ def export_highlight_clips(source,highlights,destination,progress=None,
     if progress:progress(1.,'Exported %d separate highlight MP4s'%len(outputs))
     return {'source':str(source),'folder':str(folder),'videos':outputs,
             'count':len(outputs),'original_unchanged':True}
+
+
+# ==== Cazy Creative Lab: independent, opt-in content creation ====
+
+def _creative_run(command, cancel=None, timeout=1800, cwd=None):
+    """Run FFmpeg or a configured model subprocess and surface failures."""
+    if cancel is not None and cancel.is_set():
+        raise RuntimeError('Creative Lab operation cancelled.')
+    with tempfile.TemporaryFile() as errors:
+        try:
+            proc=subprocess.Popen([str(x) for x in command],
+                stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+                stderr=errors,cwd=str(cwd) if cwd else None,
+                creationflags=_cazy_subprocess_flags())
+        except OSError as exc:
+            raise RuntimeError('Could not launch media tool: '+str(exc)) from exc
+        import time as _time
+        start=_time.monotonic()
+        try:
+            while proc.poll() is None:
+                if cancel is not None and cancel.is_set():
+                    proc.terminate()
+                    raise RuntimeError('Creative Lab operation cancelled.')
+                if _time.monotonic()-start>timeout:
+                    proc.terminate()
+                    raise RuntimeError('Media processing timed out.')
+                _time.sleep(.12)
+            if proc.returncode:
+                errors.seek(0,os.SEEK_END)
+                size=errors.tell()
+                errors.seek(max(0,size-1800))
+                raise RuntimeError('Media command failed: '+
+                                   errors.read().decode('utf-8','replace'))
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+
+
+def _creative_ffmpeg():
+    exe=engine.get_ffmpeg()
+    if not exe:
+        raise RuntimeError('Cazy Studio FFmpeg was not found.')
+    return str(exe)
+
+
+def _creative_audio_peaks(music, seconds=120, progress=None):
+    """Find musical emphasis using quarter-second PCM loudness envelopes.
+
+    This is beat/energy *estimation*, not a learned beat transcription model.
+    """
+    import numpy as np
+    music=Path(music).expanduser()
+    if not music.is_file():
+        raise FileNotFoundError(str(music))
+    ff=_creative_ffmpeg()
+    command=[ff,'-hide_banner','-loglevel','error','-nostdin',
+             '-i',str(music),'-t',str(max(10,min(300,int(seconds)))),
+             '-vn','-ac','1','-ar','2000','-f','s16le','pipe:1']
+    try:
+        proc=subprocess.run(command,stdin=subprocess.DEVNULL,capture_output=True,
+                            timeout=90,creationflags=_cazy_subprocess_flags())
+    except (OSError,subprocess.TimeoutExpired) as exc:
+        raise RuntimeError('Music analysis could not read audio: '+str(exc)) from exc
+    if proc.returncode or not proc.stdout:
+        raise RuntimeError('Music analysis failed: '+
+            proc.stderr.decode('utf-8','replace')[-1000:])
+    raw=np.frombuffer(proc.stdout[:len(proc.stdout)//2*2],dtype='<i2').astype(np.float32)
+    window=500  # 0.25 seconds at 2 kHz
+    n=len(raw)//window
+    if n<8:
+        return []
+    energy=np.sqrt((raw[:n*window].reshape(n,window)**2).mean(axis=1))
+    median=float(np.median(energy))
+    threshold=max(median*1.22,float(np.percentile(energy,70)))
+    peaks=[]
+    for i in range(2,n-2):
+        if (energy[i]>threshold and energy[i]>=energy[i-1] and
+                energy[i]>energy[i+1]):
+            strength=float(energy[i]/max(1.,median))
+            peaks.append({'at':round(i*.25,2),'strength':round(strength,2)})
+    peaks.sort(key=lambda item:(-item['strength'],item['at']))
+    picked=[]
+    for item in peaks:
+        if all(abs(item['at']-p['at'])>=1.0 for p in picked):
+            picked.append(item)
+        if len(picked)>=30:break
+    picked.sort(key=lambda item:item['at'])
+    if progress:progress(1.,'%d musical energy peaks detected'%len(picked))
+    return picked
+
+
+def creative_music_offset(music_peaks, anchor=0.0):
+    """Start partway into music so an early strong beat meets the first highlight."""
+    anchor=max(0.,float(anchor))
+    eligible=[p for p in music_peaks
+              if 2.0<=float(p.get('at',0))<=min(90.,anchor+90.)]
+    if not eligible:
+        return 0.
+    focus=max(eligible,key=lambda p:float(p.get('strength',0)))
+    return round(max(0.,float(focus['at'])-anchor),2)
+
+
+def _creative_music_mix(base,music,output,beat_sync=False,anchor=0.,
+                        progress=None,cancel=None):
+    ff=_creative_ffmpeg()
+    offset=0.
+    if beat_sync:
+        if progress:progress(.90,'Detecting music energy peaks for sync')
+        peaks=_creative_audio_peaks(music)
+        offset=creative_music_offset(peaks,anchor)
+    command=[ff,'-hide_banner','-loglevel','error','-y','-nostdin',
+             '-i',str(base),'-stream_loop','-1']
+    if offset:command+=['-ss',str(offset)]
+    command+=['-i',str(music),'-filter_complex',
+        '[0:a:0]volume=1.0[game];[1:a:0]volume=0.18[music];'
+        '[game][music]amix=inputs=2:duration=first:dropout_transition=2[a]',
+        '-map','0:v:0','-map','[a]','-c:v','copy',
+        '-c:a','aac','-b:a','256k','-movflags','+faststart',str(output)]
+    _creative_run(command,cancel=cancel,timeout=1200)
+    return {'offset':offset,'output':str(output)}
+
+
+def _creative_clips(highlights, target_seconds):
+    """Select strong moments without duplicates; present them chronologically."""
+    target=float(target_seconds)
+    if not math.isfinite(target) or not 10<=target<=120:
+        raise ValueError('Choose a target montage length of 10–120 seconds.')
+    candidates=[]
+    for item in highlights:
+        try:
+            a,b=float(item['start']),float(item['end'])
+            score=float(item.get('score',0))
+        except (KeyError,ValueError,TypeError):
+            continue
+        if all(map(math.isfinite,(a,b,score))) and a>=0 and b>a+.3:
+            candidates.append(dict(item,start=a,end=b,score=score))
+    if not candidates:
+        raise ValueError('Analyze highlights and select at least one clip.')
+    chosen=[]
+    total=0.
+    for item in sorted(candidates,key=lambda item:(-item['score'],item['start'])):
+        if any(not (item['end']<=x['start'] or item['start']>=x['end'])
+               for x in chosen):
+            continue
+        available=item['end']-item['start']
+        remaining=target-total
+        if remaining<.75:break
+        length=min(available,remaining)
+        chosen.append(dict(item,end=item['start']+length))
+        total+=length
+        if total>=target or len(chosen)>=24:break
+    chosen.sort(key=lambda item:item['start'])
+    return chosen
+
+
+def creative_export_montage(source,highlights,destination,mode='shorts',
+                            target_seconds=45.,music='',beat_sync=False,
+                            strength='Medium',progress=None,cancel=None,
+                            output_size=None):
+    """Render either vertical Shorts or a separate cinematic battle montage.
+
+    Original video, saved Abyss cuts, and Full Run files remain unchanged.
+    This uses FFmpeg effects, not neural generative video editing.
+    """
+    if mode not in ('shorts','cinematic'):
+        raise ValueError('Choose Shorts or Cinematic mode.')
+    if strength not in ('Low','Medium','High'):
+        raise ValueError('Unknown cinematic effect strength.')
+    source=Path(source).expanduser()
+    if not source.is_file():
+        raise FileNotFoundError(str(source))
+    if music and not Path(music).is_file():
+        raise FileNotFoundError(str(music))
+    clips=_creative_clips(highlights,target_seconds)
+    folder=Path(destination).expanduser()
+    folder.mkdir(parents=True,exist_ok=True)
+    ff=_creative_ffmpeg()
+    info=engine.probe(str(source))
+    has_audio=bool(info.has_audio)
+    fps=30
+    if output_size is None:
+        width,height=(1080,1920) if mode=='shorts' else (int(info.width),int(info.height))
+    else:
+        width,height=map(int,output_size)
+    if min(width,height)<64 or width%2 or height%2:
+        raise ValueError('Output dimensions must be even and at least 64 pixels.')
+    if mode=='cinematic' and width<=height:
+        raise ValueError('Cinematic test mode requires landscape dimensions.')
+    final_name='Cazy_Shorts' if mode=='shorts' else 'Cazy_Cinematic'
+    final=folder/(final_name+'.mp4')
+    number=2
+    while final.exists():
+        final=folder/(f'{final_name}_{number:02d}.mp4')
+        number+=1
+    with tempfile.TemporaryDirectory(prefix='cazy_creative_',dir=folder) as scratch:
+        tmp=Path(scratch)
+        parts=[]
+        pace=.85 if mode=='cinematic' else 1.
+        for i,clip in enumerate(clips):
+            if cancel is not None and cancel.is_set():
+                raise RuntimeError('Creative export cancelled.')
+            start=clip['start']
+            length=clip['end']-start
+            target=tmp/(f'part_{i:03}.mp4')
+            if mode=='shorts':
+                # Preserve complete widescreen gameplay on a blurred vertical canvas.
+                vf=(f'split=2[back][front];[back]scale={width}:{height}:'
+                    f'force_original_aspect_ratio=increase,crop={width}:{height},'
+                    'boxblur=12:2[blur];'
+                    f'[front]scale={width}:{height}:force_original_aspect_ratio=decrease[fg];'
+                    '[blur][fg]overlay=(W-w)/2:(H-h)/2,'
+                    f'fps={fps},setsar=1,format=yuv420p[v]')
+            else:
+                zoom={'Low':1.025,'Medium':1.045,'High':1.065}[strength]
+                jitter={'Low':0,'Medium':1,'High':3}[strength]
+                vf=(f'fps={fps},crop=iw/{zoom:.4f}:ih/{zoom:.4f}:'
+                    f'(iw-ow)/2+{jitter}*sin(n/5):'
+                    f'(ih-oh)/2+{jitter}*cos(n/7),'
+                    f'scale={width}:{height}:flags=lanczos,'
+                    f'eq=contrast=1.045:saturation=1.08,'
+                    f'setpts={1/pace:.5f}*(PTS-STARTPTS),'
+                    'setsar=1,format=yuv420p[v]')
+            command=[ff,'-hide_banner','-loglevel','error','-y','-nostdin',
+                     '-ss','%.3f'%start,'-t','%.3f'%length,'-i',str(source)]
+            if not has_audio:
+                command+=['-f','lavfi','-t','%.3f'%length,
+                          '-i','anullsrc=r=48000:cl=stereo']
+            command+=['-filter_complex',f'[0:v:0]{vf}',
+                      '-map','[v]','-map','0:a:0' if has_audio else '1:a:0',
+                      '-c:v','libx264','-preset','fast','-crf','20',
+                      '-r',str(fps),'-pix_fmt','yuv420p',
+                      '-c:a','aac','-ar','48000','-ac','2','-b:a','192k']
+            if pace!=1.:command+=['-af','atempo=%.4f'%pace]
+            command+=['-movflags','+faststart',str(target)]
+            if progress:
+                progress(i/max(1,len(clips))*.78,
+                         f'{mode.title()} clip {i+1}/{len(clips)}')
+            _creative_run(command,cancel=cancel,timeout=1200)
+            if not target.is_file() or target.stat().st_size<512:
+                raise RuntimeError('FFmpeg created an empty montage part.')
+            parts.append(target)
+        listing=tmp/'playlist.txt'
+        def quote(path):
+            return str(path.resolve()).replace('\\','/').replace("'","'\\''")
+        listing.write_text(''.join("file '"+quote(path)+"'\n" for path in parts),
+                           encoding='utf-8')
+        joined=tmp/'joined.mp4'
+        if progress:progress(.8,'Joining selected moments into one montage')
+        _creative_run([ff,'-hide_banner','-loglevel','error','-y',
+                       '-nostdin','-f','concat','-safe','0','-i',str(listing),
+                       '-c','copy','-movflags','+faststart',str(joined)],
+                      cancel=cancel,timeout=600)
+        offset=0.
+        if music:
+            if progress:progress(.89,'Mixing music once across the complete montage')
+            mix=_creative_music_mix(joined,music,final,
+                                    beat_sync=beat_sync,anchor=0,
+                                    cancel=cancel,progress=progress)
+            offset=mix['offset']
+        else:
+            shutil.move(str(joined),str(final))
+        if not final.is_file() or final.stat().st_size<1024:
+            raise RuntimeError('Cinematic / Shorts export was empty.')
+    manifest=final.with_suffix('.json')
+    manifest.write_text(json.dumps({
+        'mode':mode,'source':str(source),'selected_clips':clips,
+        'music':str(music),'beat_sync':bool(beat_sync),'music_offset':offset,
+        'cinematic_strength':strength,'output':str(final)},indent=2),
+        encoding='utf-8')
+    if progress:progress(1.,mode.title()+' export complete')
+    return {'video':str(final),'manifest':str(manifest),
+            'clips':len(clips),'music_offset':offset,'mode':mode}
+
+
+def creative_music_sync_copy(source,music,destination,anchor=0.,
+                             progress=None,cancel=None):
+    """Make an opt-in new MP4 with music beat alignment; never overwrite Full Run."""
+    source=Path(source).expanduser()
+    if not source.is_file():
+        raise FileNotFoundError(str(source))
+    if not music or not Path(music).is_file():
+        raise FileNotFoundError('Choose an existing MP3 for music synchronization.')
+    folder=Path(destination).expanduser()
+    folder.mkdir(parents=True,exist_ok=True)
+    output=folder/(source.stem+'_Music_Sync.mp4')
+    index=2
+    while output.exists():
+        output=folder/(source.stem+f'_Music_Sync_{index}.mp4')
+        index+=1
+    if progress:progress(.05,'Analyzing track and video audio')
+    with tempfile.TemporaryDirectory(prefix='cazy_sync_',dir=folder) as scratch:
+        tmp=Path(scratch)
+        if engine.probe(str(source)).has_audio:
+            base=source
+        else:
+            base=tmp/'with_silence.mp4'
+            ff=_creative_ffmpeg()
+            _creative_run([ff,'-hide_banner','-loglevel','error','-y',
+                '-nostdin','-i',str(source),'-f','lavfi','-i',
+                'anullsrc=r=48000:cl=stereo','-map','0:v:0','-map','1:a:0',
+                '-c:v','copy','-c:a','aac','-shortest',str(base)],
+                cancel=cancel)
+        result=_creative_music_mix(base,music,output,True,float(anchor),
+                                   progress=progress,cancel=cancel)
+    if progress:progress(1.,'Beat-aligned soundtrack copy ready')
+    return {'video':str(output),'offset':result['offset'],'source':str(source)}
+
+
+def creative_export_thumbnail(source,at,destination,title='',subtitle=''):
+    """Produce editable-title YouTube-style PNG without modifying source footage."""
+    from PIL import Image,ImageDraw,ImageFont,ImageOps
+    import io
+    source=Path(source).expanduser()
+    if not source.is_file():
+        raise FileNotFoundError(str(source))
+    at=max(0.,float(at))
+    if not math.isfinite(at):
+        raise ValueError('Invalid thumbnail timestamp.')
+    ff=_creative_ffmpeg()
+    cmd=[ff,'-hide_banner','-loglevel','error','-nostdin',
+         '-ss',f'{at:.3f}','-i',str(source),
+         '-frames:v','1','-f','image2pipe','-vcodec','png','pipe:1']
+    try:
+        result=subprocess.run(cmd,stdin=subprocess.DEVNULL,
+            capture_output=True,timeout=50,
+            creationflags=_cazy_subprocess_flags())
+    except (OSError,subprocess.TimeoutExpired) as exc:
+        raise RuntimeError('Could not extract thumbnail frame: '+str(exc)) from exc
+    if result.returncode or not result.stdout:
+        raise RuntimeError('Thumbnail frame extraction failed: '+
+                           result.stderr.decode('utf-8','replace')[-900:])
+    with Image.open(io.BytesIO(result.stdout)) as im:
+        canvas=ImageOps.fit(im.convert('RGB'),(1280,720),method=Image.Resampling.LANCZOS)
+    draw=ImageDraw.Draw(canvas,'RGBA')
+    # Bottom gradient improves text contrast on bright combat footage.
+    for y in range(440,720):
+        opacity=int(210*(y-440)/280)
+        draw.rectangle((0,y,1280,y+1),fill=(3,7,16,opacity))
+    def font(size):
+        for candidate in ('C:/Windows/Fonts/arialbd.ttf',
+                          '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'):
+            try:return ImageFont.truetype(candidate,size)
+            except OSError:pass
+        return ImageFont.load_default()
+    text=' '.join(str(title).strip().split())[:70]
+    sub=' '.join(str(subtitle).strip().split())[:105]
+    if text:
+        label_font=font(57 if len(text)<=32 else 41)
+        draw.text((48,540),text,font=label_font,
+                  fill=(255,255,255,255),stroke_width=3,stroke_fill=(7,9,16,230))
+    if sub:
+        draw.text((52,641),sub,font=font(29),fill=(216,204,255,255),
+                  stroke_width=1,stroke_fill=(7,9,16,220))
+    folder=Path(destination).expanduser()
+    folder.mkdir(parents=True,exist_ok=True)
+    output=folder/'Cazy_Thumbnail.png'
+    i=2
+    while output.exists():
+        output=folder/(f'Cazy_Thumbnail_{i:02d}.png')
+        i+=1
+    canvas.save(output,optimize=True)
+    return {'image':str(output),'source':str(source),'at':at,
+            'size':(1280,720),'title':text,'subtitle':sub}
