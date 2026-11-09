@@ -2583,6 +2583,10 @@ class CreativeLabWindow(tk.Toplevel):
             entry.configure(state='readonly',readonlybackground=CARD2)
             entry.pack(side='left',fill='x',expand=True,ipady=5)
             self._button(line,'Browse',callback).pack(side='left',padx=(6,0))
+        # Reserve the pinned progress / cancel footer BEFORE the expanding tabs,
+        # otherwise smaller Windows displays can clip the only Cancel control.
+        footer=tk.Frame(self,bg=BG)
+        footer.pack(side='bottom',fill='x',padx=16,pady=(0,12))
         self.tabs=ttk.Notebook(self)
         self.tabs.pack(fill='both',expand=True,padx=16,pady=(4,7))
         self.pages={}
@@ -2598,8 +2602,6 @@ class CreativeLabWindow(tk.Toplevel):
         self._make_music_sync()
         self._make_vsr()
         self._make_bugs()
-        footer=tk.Frame(self,bg=BG)
-        footer.pack(side='bottom',fill='x',padx=16,pady=(0,12))
         self.progress=ttk.Progressbar(footer,orient='horizontal',
             variable=self.progress_var,maximum=100,mode='determinate')
         self.progress.pack(fill='x',ipady=3,pady=(0,5))
