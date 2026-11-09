@@ -1,0 +1,100 @@
+name: Publish Cazy Studio v0.3.25 — OCR Windows Hotfix
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-ocr-hotfix-0325.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OCR, GUI, and media test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg tesseract-ocr tesseract-ocr-eng
+      - name: Verify Windows decoder startup, OCR and GUI regressions
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_export_0323.py
+      - name: Build and apply ZIP using actual installed v0.3.24 updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy325/base /tmp/cazy325/stage /tmp/cazy325/out
+          gh release download v0.3.24 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_24_Update.zip' --dir /tmp/cazy325/base
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy325/stage/
+          PYTHONPATH=source python - <<'PY'
+          import tempfile,zipfile,importlib.util
+          from pathlib import Path
+          from update_core import build_update_zip
+          root=Path('/tmp/cazy325')
+          previous=root/'base/Cazy_Studio_v0_3_24_Update.zip'
+          update=root/'out/Cazy_Studio_v0_3_25_Update.zip'
+          manifest=build_update_zip(root/'stage',update,'0.3.25')
+          approved={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          assert set(manifest['files'])==approved
+          with tempfile.TemporaryDirectory() as location:
+              folder=Path(location)
+              old_module=folder/'legacy.py'
+              with zipfile.ZipFile(previous) as z:
+                  old_module.write_bytes(z.read('update_core.py'))
+              spec=importlib.util.spec_from_file_location('legacy_updater',old_module)
+              legacy=importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(legacy)
+              assert approved.issubset(legacy.SAFE_FILES)
+              assert set(legacy.inspect_update_zip(update,'0.3.25')['files'])==approved
+              installed=folder/'installation'
+              installed.mkdir()
+              with zipfile.ZipFile(previous) as z:
+                  old_manifest=legacy.inspect_update_zip(previous,'0.3.24')
+                  for filename in old_manifest['files']:
+                      (installed/filename).write_bytes(z.read(filename))
+              legacy.apply_update_zip(update,installed,'0.3.25')
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.25'"
+              assert 'SCAN STATUS: Ready' in (installed/'app.py').read_text()
+              assert 'RENDER COMPLETE — 100%' in (installed/'app.py').read_text()
+              assert 'NVENC API' in (installed/'quality_engine.py').read_text()
+              assert 'last_render_error.log' in (installed/'quality_engine.py').read_text()
+              assert "'Error Log'" in (installed/'app.py').read_text()
+              assert "'REVIEW SAVED CUTS'" in (installed/'app.py').read_text()
+              assert '_autodirector_load_scan_cache' in (installed/'app.py').read_text()
+              assert 'self.export_window.lift()' in (installed/'app.py').read_text()
+              assert 'Live Render Progress' in (installed/'quality_ui.py').read_text()
+              assert 'def _cazy_ocr_frame_stream(' in (installed/'quality_engine.py').read_text()
+              assert 'class _CazyOCRDecoderFailure' in (installed/'quality_engine.py').read_text()
+              legacy.rollback_latest(installed)
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.24'"
+          print('v0.3.24 updater installed/rolled back v0.3.25: PASS')
+          PY
+      - name: Publish verified Windows OCR hotfix
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /tmp/cazy325/out
+          if gh release view v0.3.25 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.3.25 Cazy_Studio_v0_3_25_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.3.25 Cazy_Studio_v0_3_25_Update.zip \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.3.25 — Windows OCR Scanner Hotfix' \
+              --notes 'Hotfixes AutoDirector OCR scan startup on Windows: fixes NameError for a mistyped _legacy_ffmpeg_path() helper by using the existing _legacy_ffmpeg_cache_path(). Adds Windows-specific regression tests for decoder selection with and without cached compatible FFmpeg. Fixes hardcoded v0.3.23 window title and toolbar labels to display the installed version automatically. Preserves external FFmpeg OCR decoding from v0.3.24, OpenCV crash containment, short Start Challenge OCR detection, 2-second preroll, all chamber cuts, Full Run MP4 joining, music, saved scans, Quality Lab, RIFE, Real-ESRGAN, NVENC, updater and settings. Validated in Linux automated OCR/GUI tests and updater installation/rollback; test again on original Windows OBS footage.'
+          fi
+          gh release edit v0.3.25 --repo "$GITHUB_REPOSITORY" --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_3_25_Update
+          path: /tmp/cazy325/out/Cazy_Studio_v0_3_25_Update.zip
+          if-no-files-found: error
+# Pipeline revision 2: preserve established OCR result fields while isolating videoio.
