@@ -2560,7 +2560,7 @@ class MusicHunterWindow(tk.Toplevel):
             self.table.delete(child)
         self.status_var.set('Searching and verifying dates…')
         self._work('search',lambda:quality_engine.music_hunter_search(
-            query,months=months,limit=10,
+            query,months=months,limit=10,return_report=True,
             progress=lambda message:self._messages.put(('progress',message))))
 
     def preview(self):
@@ -2621,16 +2621,14 @@ class MusicHunterWindow(tk.Toplevel):
                     continue
                 self._set_busy(False)
                 if kind=='search':
-                    self._results=list(data)
+                    report=data if isinstance(data,dict) else {'results':data}
+                    self._results=list(report.get('results') or [])
                     for i,item in enumerate(self._results):
                         self.table.insert('',tk.END,iid=str(i),values=(
                             item['upload_date'],item['title'],
                             item['channel'],item['license']))
-                    self.status_var.set(
-                        f'{len(self._results)} verified-recent uploads. '
-                        'Preview and check the creator license before importing.'
-                        if self._results else
-                        'No verified-recent matches found. Try a broader phrase or 12 months.')
+                    self.status_var.set(str(report.get('message') or
+                        f'{len(self._results)} recent tracks discovered.'))
                 elif kind=='download':
                     self.owner.music_var.set(self.folder_var.get())
                     self.owner.save()
