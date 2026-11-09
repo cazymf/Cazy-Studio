@@ -1,0 +1,128 @@
+name: Publish Cazy Studio v0.4.0 — All-in-One Creative Lab Test Build
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-creative-suite-0400.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  linux-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install OCR, GUI, and media test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg tesseract-ocr tesseract-ocr-eng
+      - name: Test All-in-One Creative Lab media exports, models, OCR and GUI
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_export_0323.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_music_hunter_0328.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_highlight_0330.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_creative_0400.py
+      - name: Build and apply ZIP using actual installed v0.3.30 updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/cazy400/base /tmp/cazy400/stage /tmp/cazy400/out
+          gh release download v0.3.30 --repo "$GITHUB_REPOSITORY" \
+            --pattern 'Cazy_Studio_v0_3_30_Update.zip' --dir /tmp/cazy400/base
+          cp source/app.py source/quality_engine.py source/quality_ui.py \
+            source/update_core.py source/version.py /tmp/cazy400/stage/
+          PYTHONPATH=source python - <<'PY'
+          import tempfile,zipfile,importlib.util
+          from pathlib import Path
+          from update_core import build_update_zip
+          root=Path('/tmp/cazy400')
+          previous=root/'base/Cazy_Studio_v0_3_30_Update.zip'
+          update=root/'out/Cazy_Studio_v0_4_0_Update.zip'
+          manifest=build_update_zip(root/'stage',update,'0.4.0')
+          approved={'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          assert set(manifest['files'])==approved
+          with tempfile.TemporaryDirectory() as location:
+              folder=Path(location)
+              old_module=folder/'legacy.py'
+              with zipfile.ZipFile(previous) as z:
+                  old_module.write_bytes(z.read('update_core.py'))
+              spec=importlib.util.spec_from_file_location('legacy_updater',old_module)
+              legacy=importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(legacy)
+              assert approved.issubset(legacy.SAFE_FILES)
+              assert set(legacy.inspect_update_zip(update,'0.4.0')['files'])==approved
+              installed=folder/'installation'
+              installed.mkdir()
+              with zipfile.ZipFile(previous) as z:
+                  old_manifest=legacy.inspect_update_zip(previous,'0.3.30')
+                  for filename in old_manifest['files']:
+                      (installed/filename).write_bytes(z.read(filename))
+              legacy.apply_update_zip(update,installed,'0.4.0')
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.4.0'"
+              assert 'SCAN STATUS: Ready' in (installed/'app.py').read_text()
+              assert 'RENDER COMPLETE — 100%' in (installed/'app.py').read_text()
+              assert 'NVENC API' in (installed/'quality_engine.py').read_text()
+              assert 'last_render_error.log' in (installed/'quality_engine.py').read_text()
+              assert "'Error Log'" in (installed/'app.py').read_text()
+              assert "'REVIEW SAVED CUTS'" in (installed/'app.py').read_text()
+              assert '_autodirector_load_scan_cache' in (installed/'app.py').read_text()
+              assert 'self.export_window.lift()' in (installed/'app.py').read_text()
+              assert 'Live Render Progress' in (installed/'quality_ui.py').read_text()
+              assert 'def _cazy_ocr_frame_stream(' in (installed/'quality_engine.py').read_text()
+              assert 'class _CazyOCRDecoderFailure' in (installed/'quality_engine.py').read_text()
+              assert 'def music_hunter_search(' in (installed/'quality_engine.py').read_text()
+              assert 'def music_hunter_import(' in (installed/'quality_engine.py').read_text()
+              assert 'class MusicHunterWindow(' in (installed/'app.py').read_text()
+              assert '♫ MUSIC HUNTER (BETA)' in (installed/'app.py').read_text()
+              assert 'def _autodirector_choose_export_music(' in (installed/'app.py').read_text()
+              assert 'def highlight_finder_scan(' in (installed/'quality_engine.py').read_text()
+              assert 'def export_highlight_clips(' in (installed/'quality_engine.py').read_text()
+              assert 'class HighlightFinderWindow(' in (installed/'app.py').read_text()
+              assert '✦ HIGHLIGHT FINDER (BETA)' in (installed/'app.py').read_text()
+              assert 'class CreativeLabWindow(' in (installed/'app.py').read_text()
+              assert 'def creative_export_montage(' in (installed/'quality_engine.py').read_text()
+              assert 'def creative_music_sync_copy(' in (installed/'quality_engine.py').read_text()
+              assert 'def creative_export_thumbnail(' in (installed/'quality_engine.py').read_text()
+              assert 'def creative_vsr_preflight(' in (installed/'quality_engine.py').read_text()
+              assert 'def creative_vsr_ab_preview(' in (installed/'quality_engine.py').read_text()
+              assert 'def music_hunter_import_batch(' in (installed/'quality_engine.py').read_text()
+              assert '⬇ DOWNLOAD ALL SELECTED → MP3 → CAZY MUSIC FOLDER' in (installed/'app.py').read_text()
+              legacy.rollback_latest(installed)
+              assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.30'"
+          print('v0.3.30 updater installed/rolled back v0.4.0: PASS')
+          PY
+      - name: Publish tested All-in-One Creative Lab build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd /tmp/cazy400/out
+          if gh release view v0.4.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v0.4.0 Cazy_Studio_v0_4_0_Update.zip --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v0.4.0 Cazy_Studio_v0_4_0_Update.zip \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+              --title 'Cazy Studio v0.4.0 — All-in-One Creative Lab' \
+              --notes 'One consolidated Creative Lab test build so users can test multiple roadmap items and submit one bug report. New Creative Lab has 7 tabs: (1) Highlights, reusing optional local visual motion/detail detection; (2) vertical 9:16 Shorts from selected highlights with blurred background and preserved source audio; (3) separate Cinematic montage with mild zoom, slow-motion and camera motion, adjustable strength; (4) standalone 1280x720 thumbnails with editable title/subtitle; (5) music energy-peak detection and optional beat-aligned soundtrack video copies; (6) RealBasicVSR and EGVSR model setup checks and genuine 8-second original-vs-enhanced comparison if external CUDA model weights/code are installed; (7) one Markdown Bug Notes checklist saved to the selected output folder. The VSR models are NOT bundled: RealBasicVSR uses official inference_realbasicvsr.py; EGVSR additionally requires a user-provided video wrapper around its research test script. These are beta tools: visual highlighting and beat estimation are heuristic, cinematic effects are FFmpeg not generative AI, model performance has not been verified on the users RTX 4080. Music Hunter / MP3 batch download / random music on Full Run / v0.3.30 Highlight Finder remain available. The working Abyss OCR detector, manual retry behavior, Full Run renderer, NVENC and saved cuts are unchanged as the user requested. Automated tests, real FFmpeg mini-export integration, Tk GUI smoke and update rollback gates passed if this release exists; users should test with their own Windows footage.'
+          fi
+          gh release edit v0.4.0 --repo "$GITHUB_REPOSITORY" --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_4_0_Update
+          path: /tmp/cazy400/out/Cazy_Studio_v0_4_0_Update.zip
+          if-no-files-found: error
+# Automated release for the first incremental music discovery feature.
+
+# CI revision 2: enable optional YouTube music feature without altering local video source guarantees.
+
+# CI revision 2: updated batch destination persistence assertion.
+
+# CI revision 3: visible Tk root in transient Music Hunter GUI smoke.
+
+# CI revision 2: independent larger frame-preview window keeps controls visible.
