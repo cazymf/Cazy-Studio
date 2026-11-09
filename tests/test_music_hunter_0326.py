@@ -125,6 +125,72 @@ class MusicHunterTests(unittest.TestCase):
         self.assertIn('self.permission_var.get()',app)
         self.assertIn("self.owner.music_var.set(self.folder_var.get())",app)
 
+    def test_batch_select_all_skips_existing_tracks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            (root/'Already Here - AAAAAAAAAAA.mp3').write_bytes(b'a')
+            calls=[]
+            def fake_import(url,destination,progress=None):
+                ident=quality._music_hunter_video_id(url)
+                calls.append(ident)
+                if ident=='CCCCCCCCCCC':
+                    raise RuntimeError('YouTube video unavailable')
+                file=Path(destination)/('Imported - '+ident+'.mp3')
+                file.write_bytes(b'audio')
+                return str(file)
+            urls=['https://www.youtube.com/watch?v=AAAAAAAAAAA',
+                  'https://www.youtube.com/watch?v=BBBBBBBBBBB',
+                  'https://youtu.be/BBBBBBBBBBB',
+                  'https://youtu.be/CCCCCCCCCCC']
+            notifications=[]
+            with mock.patch.object(quality,'music_hunter_import',side_effect=fake_import):
+                result=quality.music_hunter_import_batch(
+                    urls,root,progress=lambda number,total,msg:
+                    notifications.append((number,total,msg)))
+            self.assertEqual(len(result['downloaded']),1)
+            self.assertEqual(len(result['skipped']),2)
+            self.assertEqual(len(result['failed']),1)
+            self.assertIn('YouTube video unavailable',result['failed'][0]['error'])
+            self.assertEqual(calls,['BBBBBBBBBBB','CCCCCCCCCCC'])
+            self.assertTrue(Path(result['downloaded'][0]).exists())
+            self.assertEqual(notifications[-1][0],4)
+
+    def test_batch_can_be_stopped_between_tracks(self):
+        import threading
+        with tempfile.TemporaryDirectory() as folder:
+            cancelled=threading.Event()
+            calls=[]
+            def fake_import(url,destination,progress=None):
+                calls.append(url)
+                cancelled.set()
+                output=Path(destination)/'Track - AAAAAAAAAAA.mp3'
+                output.write_bytes(b'complete')
+                return str(output)
+            with mock.patch.object(quality,'music_hunter_import',side_effect=fake_import):
+                result=quality.music_hunter_import_batch([
+                    'https://youtu.be/AAAAAAAAAAA',
+                    'https://youtu.be/BBBBBBBBBBB'],folder,cancel=cancelled)
+            self.assertEqual(len(calls),1)
+            self.assertTrue(result['cancelled'])
+            self.assertEqual(len(result['downloaded']),1)
+
+    def test_managed_music_library_is_update_safe(self):
+        import os
+        with tempfile.TemporaryDirectory() as folder:
+            with mock.patch.dict(os.environ,{'LOCALAPPDATA':folder}):
+                expected=Path(folder)/'CazyStudio'/'Music'
+                self.assertEqual(quality.music_hunter_library_path(),expected)
+
+    def test_batch_ui_select_all_visible_and_pinned(self):
+        app=(ROOT/'source'/'app.py').read_text(encoding='utf-8')
+        self.assertIn('self.table.selection_set(*items)',app)
+        self.assertIn("selectmode='extended'",app)
+        self.assertIn('self.select_all()',app)
+        self.assertIn('self.footer.pack(side=',app)
+        self.assertIn('⬇ DOWNLOAD ALL SELECTED → MP3 → CAZY MUSIC FOLDER',app)
+        self.assertIn('music_hunter_import_batch(',app)
+        self.assertIn('self.progress_bar.pack(',app)
+
     def test_no_arbitrary_url_download(self):
         for bad in ('http://www.youtube.com/watch?v=AAAAAAAAAAA',
                     'https://example.com/video',
