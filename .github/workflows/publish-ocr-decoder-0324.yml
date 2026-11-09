@@ -71,8 +71,8 @@ jobs:
               assert '_autodirector_load_scan_cache' in (installed/'app.py').read_text()
               assert 'self.export_window.lift()' in (installed/'app.py').read_text()
               assert 'Live Render Progress' in (installed/'quality_ui.py').read_text()
-          assert 'def _cazy_ocr_frame_stream(' in (installed/'quality_engine.py').read_text()
-          assert 'class _CazyOCRDecoderFailure' in (installed/'quality_engine.py').read_text()
+              assert 'def _cazy_ocr_frame_stream(' in (installed/'quality_engine.py').read_text()
+              assert 'class _CazyOCRDecoderFailure' in (installed/'quality_engine.py').read_text()
               legacy.rollback_latest(installed)
               assert (installed/'version.py').read_text().strip()=="APP_VERSION = '0.3.23'"
           print('v0.3.23 updater installed/rolled back v0.3.24: PASS')
