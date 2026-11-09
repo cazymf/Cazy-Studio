@@ -2222,3 +2222,174 @@ def render_full_run(segments,destination,preset_name,music="",progress=None,
     if progress:progress(100,"Full Run export complete")
     return {"video":str(result_video),"thumbnail":str(result_thumb),
             "title":str(result_title),"cuts":str(result_manifest)}
+
+# ---- Music Hunter beta: recent discoveries and authorized MP3 import ----
+
+def _music_hunter_date(value):
+    """Never guess the date of a YouTube song."""
+    import datetime
+    if isinstance(value,(int,float)) and value > 1_000_000_000:
+        try:
+            return datetime.datetime.fromtimestamp(value,datetime.timezone.utc).date()
+        except (OSError,ValueError,OverflowError):
+            return None
+    text=str(value or '')
+    if len(text)==8 and text.isdigit():
+        try:return datetime.datetime.strptime(text,'%Y%m%d').date()
+        except ValueError:return None
+    return None
+
+
+def _music_hunter_month_cutoff(months):
+    import datetime,calendar
+    months=int(months)
+    if months not in (1,3,6,12):
+        raise ValueError('Music Hunter supports 1, 3, 6, or 12 months')
+    today=datetime.datetime.now(datetime.timezone.utc).date()
+    index=today.year*12+today.month-1-months
+    year,month=divmod(index,12)
+    month+=1
+    return datetime.date(year,month,min(today.day,calendar.monthrange(year,month)[1]))
+
+
+def _music_hunter_ytdlp():
+    try:
+        import yt_dlp
+    except ImportError as exc:
+        raise RuntimeError('Music Hunter requires yt-dlp. Click Install Music Tools in its window.') from exc
+    return yt_dlp
+
+
+def music_hunter_search(query,months=6,limit=10,progress=None):
+    """Search YouTube by newest upload, verify dates, and exclude older results.
+
+    Rules-based ranking, not an LLM or a copyright/permission verifier.
+    """
+    query=' '.join(str(query or '').split())
+    if not 3 <= len(query) <= 180:
+        raise ValueError('Describe the music you want (3–180 characters).')
+    limit=max(1,min(12,int(limit)))
+    cutoff=_music_hunter_month_cutoff(months)
+    yt_dlp=_music_hunter_ytdlp()
+    opts={'quiet':True,'no_warnings':True,'skip_download':True,
+          'ignoreerrors':True,'extract_flat':'in_playlist',
+          'playlistend':min(40,limit*4),'socket_timeout':15,
+          'retries':1,'extractor_retries':1}
+    if progress:progress('Searching recent music on YouTube…')
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            found=ydl.extract_info(
+                f'ytsearchdate{min(40,limit*4)}:{query}',download=False)
+            candidates=list((found or {}).get('entries') or [])
+    except Exception as exc:
+        raise RuntimeError('Music discovery failed: '+str(exc)) from exc
+    results=[]
+    tokens=set(re.findall(r'[a-z0-9]{3,}',query.casefold()))
+    with yt_dlp.YoutubeDL(dict(opts,extract_flat=False,noplaylist=True,
+                               playlistend=None)) as ydl:
+        for item in candidates:
+            if len(results)>=limit:break
+            if not isinstance(item,dict):continue
+            ident=str(item.get('id') or '')
+            address=str(item.get('webpage_url') or item.get('url') or '')
+            if not address.startswith(('https://www.youtube.com/watch?',
+                                       'https://youtube.com/watch?',
+                                       'https://youtu.be/')):
+                if re.fullmatch(r'[A-Za-z0-9_-]{11}',ident):
+                    address='https://www.youtube.com/watch?v='+ident
+                else:continue
+            if progress:progress(f'Checking upload dates: {len(results)}/{limit} matches')
+            try:full=ydl.extract_info(address,download=False) or {}
+            except Exception:continue
+            if not isinstance(full,dict) or full.get('is_live') or full.get('live_status') in ('is_live','is_upcoming'):
+                continue
+            uploaded=(_music_hunter_date(full.get('upload_date')) or
+                      _music_hunter_date(full.get('release_date')) or
+                      _music_hunter_date(full.get('timestamp')))
+            released=_music_hunter_date(full.get('release_date'))
+            if not uploaded or uploaded<cutoff or (released and released<cutoff):
+                continue
+            title=str(full.get('title') or item.get('title') or '').strip()[:180]
+            if not title:continue
+            duration=float(full.get('duration') or 0)
+            if duration and not 40<=duration<=3600:continue
+            creator=str(full.get('uploader') or full.get('channel') or '')[:100]
+            license_text=str(full.get('license') or '')[:100]
+            overlap=len(tokens.intersection(set(re.findall(
+                r'[a-z0-9]{3,}',(title+' '+creator).casefold()))))
+            results.append({
+                'title':title,'url':str(full.get('webpage_url') or address),
+                'channel':creator,'upload_date':uploaded.isoformat(),
+                'release_date':released.isoformat() if released else '',
+                'duration':int(duration) if duration else 0,
+                'license':license_text or 'Not verified — check creator permissions',
+                'match_score':overlap,
+                'original_release_verified':bool(released)})
+    results.sort(key=lambda e:(e['upload_date'],e['match_score']),reverse=True)
+    if progress:progress(f'Found {len(results)} recent songs. Check permissions before importing.')
+    return results
+
+
+def _music_hunter_safe_name(title):
+    text=re.sub(r'[^A-Za-z0-9 _.-]+',' ',str(title or 'Battle Track'))
+    return ' '.join(text.split()).strip(' ._-')[:90] or 'Battle Track'
+
+
+def music_hunter_import(url,destination,progress=None):
+    """Retrieve one permission-granted YouTube track and encode its audio as MP3."""
+    from urllib.parse import urlsplit
+    address=str(url or '').strip()
+    parsed=urlsplit(address)
+    if parsed.scheme!='https' or (parsed.hostname or '').lower() not in (
+        'www.youtube.com','youtube.com','music.youtube.com','m.youtube.com','youtu.be'):
+        raise ValueError('Only HTTPS YouTube video links are accepted.')
+    yt_dlp=_music_hunter_ytdlp()
+    folder=Path(destination).expanduser()
+    folder.mkdir(parents=True,exist_ok=True)
+    ffmpeg=engine.get_ffmpeg()
+    if not ffmpeg or not Path(ffmpeg).is_file():
+        raise RuntimeError('Cazy Studio FFmpeg executable was not found.')
+    with tempfile.TemporaryDirectory(prefix='cazy_music_',dir=folder) as td:
+        scratch=Path(td)
+        opts={'format':'bestaudio/best',
+              'outtmpl':str(scratch/'source.%(ext)s'),
+              'noplaylist':True,'quiet':True,'no_warnings':True,
+              'socket_timeout':20,'retries':2,'extractor_retries':2,
+              'overwrites':False,'continuedl':True}
+        if progress:progress('Downloading selected audio…')
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                metadata=ydl.extract_info(address,download=True)
+        except Exception as exc:
+            raise RuntimeError('Audio retrieval failed: '+str(exc)) from exc
+        if not isinstance(metadata,dict):
+            raise RuntimeError('The source returned no usable audio metadata.')
+        audio=next((p for p in scratch.iterdir()
+                    if p.is_file() and p.name.startswith('source.')
+                    and p.suffix.lower() not in ('.part','.ytdl','.tmp')),None)
+        if not audio:raise RuntimeError('No audio file was downloaded.')
+        if progress:progress('Converting audio to MP3 with Studio FFmpeg…')
+        output=scratch/'converted.mp3'
+        command=[str(ffmpeg),'-hide_banner','-loglevel','error','-y',
+                 '-i',str(audio),'-vn','-map','0:a:0',
+                 '-c:a','libmp3lame','-b:a','256k',str(output)]
+        try:
+            completed=subprocess.run(command,stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
+                timeout=600,creationflags=_cazy_subprocess_flags())
+        except (OSError,subprocess.TimeoutExpired) as exc:
+            raise RuntimeError('MP3 conversion failed: '+str(exc)) from exc
+        if completed.returncode or not output.is_file() or output.stat().st_size<512:
+            raise RuntimeError('MP3 conversion failed: '+
+                completed.stderr.decode('utf-8','replace')[-1200:])
+        title=_music_hunter_safe_name(metadata.get('title') or 'Battle Track')
+        ident=_music_hunter_safe_name(metadata.get('id') or '')[:16]
+        stem=f'{title} - {ident}' if ident else title
+        target=folder/(stem+'.mp3')
+        count=2
+        while target.exists():
+            target=folder/(f'{stem} ({count}).mp3')
+            count+=1
+        shutil.move(str(output),str(target))
+        if progress:progress('Saved to library: '+target.name)
+        return str(target)
