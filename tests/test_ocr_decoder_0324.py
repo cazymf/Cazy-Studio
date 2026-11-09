@@ -103,8 +103,8 @@ class IsolatedOCRDecoderTests(unittest.TestCase):
             self.assertEqual(len(report['segments']),2,report)
             self.assertAlmostEqual(report['segments'][0]['start'],0.,delta=.5)
             self.assertAlmostEqual(report['segments'][1]['start'],2.25,delta=.5)
-            self.assertEqual(report['detection_method'],
-                             'Local text OCR (external decoder)')
+            self.assertEqual(report['detection_method'], 'Local text OCR')
+            self.assertEqual(report['decoder_backend'], 'External FFmpeg process')
 
 
 if __name__=='__main__':
