@@ -159,7 +159,7 @@ class CreativeSuiteMedia(unittest.TestCase):
         from PIL import Image
         result=creative.creative_export_thumbnail(
             self.source,1.5,self.root/'Thumbs',
-            title='BOSS FIGHT','GENSHIN IMPACT')
+            title='BOSS FIGHT',subtitle='GENSHIN IMPACT')
         with Image.open(result['image']) as img:
             self.assertEqual(img.size,(1280,720))
         self.assertEqual(result['title'],'BOSS FIGHT')
