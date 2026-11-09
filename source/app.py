@@ -2566,10 +2566,9 @@ class HighlightFinderWindow(tk.Toplevel):
         self.table.configure(yscrollcommand=scrollbar.set)
         self.table.bind('<<TreeviewSelect>>',lambda event:self._select_status())
         self.table.bind('<Double-1>',lambda event:self.preview_frame())
-        self.preview_label=tk.Label(self,bg=CARD2,fg=MUTED,
-                 text='Select a suggested moment and click Preview Frame',
-                 font=('Segoe UI',10),height=9)
-        self.preview_label.pack(fill='x',padx=18,pady=(7,3))
+        tk.Label(self,text='Double-click a highlight or use Preview Frame to inspect it in a separate window.',
+                 bg=BG,fg=MUTED,font=('Segoe UI',9),anchor='w').pack(
+                 fill='x',padx=20,pady=(6,4))
         actions=tk.Frame(footer,bg=BG)
         actions.pack(fill='x')
         self.scan_button=tk.Button(actions,text='ANALYZE VIDEO',command=self.analyze,
@@ -2632,7 +2631,6 @@ class HighlightFinderWindow(tk.Toplevel):
             self.status_var.set('Video selected. Click ANALYZE VIDEO.')
             self.table.delete(*self.table.get_children())
             self._preview_photo=None
-            self.preview_label.configure(image='',text='Preview will appear here.',height=9)
 
     def analyze(self):
         path=self.source_var.get().strip()
@@ -2692,7 +2690,7 @@ class HighlightFinderWindow(tk.Toplevel):
                 raise RuntimeError('FFmpeg could not preview the selected moment: '+
                     proc.stderr.decode('utf-8','replace')[-750:])
             with Image.open(io.BytesIO(proc.stdout)) as picture:
-                picture.thumbnail((880,225))
+                picture.thumbnail((900,490))
                 return picture.convert('RGB').copy()
         self._work('preview',render)
 
@@ -2739,9 +2737,16 @@ class HighlightFinderWindow(tk.Toplevel):
                         'sampled frames. These are visual-motion suggestions, '
                         'not confirmed bursts or dodges. Review before export.')
                 elif kind=='preview':
-                    self._preview_photo=ImageTk.PhotoImage(data,master=self)
-                    self.preview_label.configure(image=self._preview_photo,text='',height=data.height)
-                    self.status_var.set('Preview ready. Review the clip timestamps.')
+                    window=tk.Toplevel(self)
+                    window.title('Cazy Highlight Finder — Frame Preview')
+                    window.configure(bg=BG)
+                    self._preview_window=window
+                    self._preview_photo=ImageTk.PhotoImage(data,master=window)
+                    tk.Label(window,image=self._preview_photo,bg=BG).pack(padx=14,pady=14)
+                    tk.Button(window,text='Close Preview',command=window.destroy,
+                              bg=CARD2,fg=TEXT,relief='flat',padx=16,pady=8).pack(
+                                  pady=(0,12))
+                    self.status_var.set('Preview ready in separate window. Review clip timestamps before export.')
                 elif kind=='export':
                     self.progress_var.set(100)
                     self.status_var.set(f'Exported {data["count"]} highlights to {data["folder"]}')
