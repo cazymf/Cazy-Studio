@@ -1328,6 +1328,8 @@ class AutoDirectorView(tk.Frame):
         self._label(top, 'CAZY AUTODIRECTOR', 19, ACCENT, True).pack(side='left')
         self._label(top, 'Select videos  →  Scan gameplay  →  Review cuts', 10, MUTED).pack(side='left', padx=18)
         self._button(top, 'Save Library', self.save).pack(side='right')
+        self._button(top, '✦ CREATIVE LAB — ALL FEATURES',
+                     self.open_creative_lab, True).pack(side='right',padx=(0,7))
         self._button(top, '✦ HIGHLIGHT FINDER (BETA)',
                      self.open_highlight_finder, True).pack(side='right',padx=(0,8))
 
@@ -1659,6 +1661,13 @@ class AutoDirectorView(tk.Frame):
         self.tree.selection_set(str(j))
         self.tree.see(str(j))
         self._update_details()
+
+    def open_creative_lab(self):
+        existing=getattr(self,'_creative_lab_window',None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            return
+        self._creative_lab_window=CreativeLabWindow(self)
 
     def open_highlight_finder(self):
         existing=getattr(self,'_highlight_finder_window',None)
@@ -2490,6 +2499,559 @@ class AutoDirectorView(tk.Frame):
 
 
 
+
+
+
+
+class CreativeLabWindow(tk.Toplevel):
+    """Unified Cazy Studio feature testbench, independent of clean Full Run."""
+
+    def __init__(self,owner):
+        super().__init__(owner)
+        self.owner=owner
+        self.title('Cazy Studio Creative Lab — All-in-One Test Build')
+        self.geometry('1150x840')
+        self.minsize(860,660)
+        self.configure(bg=BG)
+        self.transient(owner.winfo_toplevel())
+        index=owner._selected()
+        initial=(owner.state['queue'][index]['path'] if 0<=index<len(
+            owner.state['queue']) else owner.state['queue'][0]['path']
+            if owner.state['queue'] else '')
+        try:
+            music=_autodirector_choose_export_music(owner.state)
+        except (ValueError,OSError):
+            music=''
+        self.source_var=tk.StringVar(value=initial)
+        self.music_var=tk.StringVar(value=music)
+        self.destination_var=tk.StringVar(
+            value=str(Path.home()/'Videos'/'CazyStudioExports'))
+        self.status_var=tk.StringVar(value=
+            'All creative features are optional. Select a video, analyze highlights, then test a tool.')
+        self.progress_var=tk.DoubleVar(value=0.)
+        self._events=queue.Queue()
+        self._cancel=threading.Event()
+        self._busy=False
+        self._highlights=[]
+        self._result=None
+        self._beats=[]
+        self.shorts_seconds=tk.StringVar(value='45')
+        self.cinematic_seconds=tk.StringVar(value='45')
+        self.cinematic_strength=tk.StringVar(value='Medium')
+        self.music_sync_var=tk.BooleanVar(value=True)
+        self.thumb_title=tk.StringVar(value='THE ULTIMATE ABYSS RUN')
+        self.thumb_subtitle=tk.StringVar(value='GENSHIN IMPACT • CAZY STUDIO')
+        self.vsr_model=tk.StringVar(value='RealBasicVSR')
+        self.vsr_repo=tk.StringVar(value='')
+        self.vsr_weights=tk.StringVar(value='')
+        self.vsr_python=tk.StringVar(value='')
+        self.vsr_status=tk.StringVar(value='Model runtimes are external and not bundled.')
+        self._build()
+        self.after(150,self._poll)
+
+    def _label(self,parent,text,size=10,color=TEXT,bold=False):
+        return tk.Label(parent,text=text,bg=parent.cget('bg'),fg=color,
+            font=('Segoe UI',size,'bold' if bold else 'normal'),anchor='w',
+            justify='left')
+
+    def _button(self,parent,title,callback,primary=False):
+        return tk.Button(parent,text=title,command=callback,
+            bg=ACCENT if primary else CARD2,fg='#101019' if primary else TEXT,
+            relief='flat',font=('Segoe UI',9,'bold'),padx=12,pady=9)
+
+    def _entry(self,parent,var):
+        return tk.Entry(parent,textvariable=var,bg=CARD2,fg=TEXT,
+            insertbackground=TEXT,relief='flat',font=('Segoe UI',10))
+
+    def _build(self):
+        header=tk.Frame(self,bg=BG)
+        header.pack(fill='x',padx=16,pady=(12,4))
+        self._label(header,'✦ CREATIVE LAB • ONE TEST BUILD',17,ACCENT,True).pack(
+            side='left')
+        self._label(header,'Full Run / OCR remain unchanged',9,GREEN).pack(
+            side='right')
+        inputs=tk.Frame(self,bg=CARD,padx=12,pady=8)
+        inputs.pack(fill='x',padx=16,pady=(4,6))
+        for name,var,callback in (
+            ('VIDEO SOURCE',self.source_var,self.choose_source),
+            ('MUSIC TRACK (optional)',self.music_var,self.choose_music),
+            ('OUTPUT / BUG NOTES',self.destination_var,self.choose_destination)):
+            line=tk.Frame(inputs,bg=CARD)
+            line.pack(fill='x',pady=3)
+            self._label(line,name,9,ACCENT2,True).pack(side='left',padx=(0,8))
+            entry=self._entry(line,var)
+            entry.configure(state='readonly',readonlybackground=CARD2)
+            entry.pack(side='left',fill='x',expand=True,ipady=5)
+            self._button(line,'Browse',callback).pack(side='left',padx=(6,0))
+        self.tabs=ttk.Notebook(self)
+        self.tabs.pack(fill='both',expand=True,padx=16,pady=(4,7))
+        self.pages={}
+        for title in ('Highlights','Shorts','Cinematic','Thumbnail',
+                      'Music Sync','RealBasicVSR + EGVSR','Bug Notes'):
+            page=tk.Frame(self.tabs,bg=BG,padx=14,pady=12)
+            self.tabs.add(page,text=title)
+            self.pages[title]=page
+        self._make_highlights()
+        self._make_shorts()
+        self._make_cinematic()
+        self._make_thumbnail()
+        self._make_music_sync()
+        self._make_vsr()
+        self._make_bugs()
+        footer=tk.Frame(self,bg=BG)
+        footer.pack(side='bottom',fill='x',padx=16,pady=(0,12))
+        self.progress=ttk.Progressbar(footer,orient='horizontal',
+            variable=self.progress_var,maximum=100,mode='determinate')
+        self.progress.pack(fill='x',ipady=3,pady=(0,5))
+        bottom=tk.Frame(footer,bg=BG)
+        bottom.pack(fill='x')
+        tk.Label(bottom,textvariable=self.status_var,bg=BG,fg=ACCENT2,
+            wraplength=930,justify='left',anchor='w',font=('Segoe UI',9)).pack(
+            side='left',fill='x',expand=True)
+        self.cancel_button=self._button(bottom,'CANCEL JOB',self.cancel)
+        self.cancel_button.configure(state='disabled')
+        self.cancel_button.pack(side='right',padx=(10,0))
+
+    def _make_highlights(self):
+        page=self.pages['Highlights']
+        self._label(page,'01 • VISUAL HIGHLIGHT INTELLIGENCE — BETA',14,ACCENT,True).pack(
+            anchor='w',pady=(0,3))
+        self._label(page,'Uses actual motion/detail activity. It cannot yet identify named game attacks or damage values.',
+                    9,YELLOW).pack(anchor='w',pady=(0,9))
+        row=tk.Frame(page,bg=BG)
+        row.pack(fill='x',pady=(0,8))
+        self.analyze_button=self._button(row,'ANALYZE VISUAL HIGHLIGHTS',self.analyze,True)
+        self.analyze_button.pack(side='left')
+        self._button(row,'Select All',self.select_all).pack(side='left',padx=8)
+        self._button(row,'Use Highlight Finder Results',self.reuse_highlights).pack(
+            side='left')
+        self._label(page,'Selected moments power Shorts, Cinematic and Thumbnail tabs.',
+                    9,MUTED).pack(anchor='w',pady=(0,7))
+        shell=tk.Frame(page,bg=BG)
+        shell.pack(fill='both',expand=True)
+        self.table=ttk.Treeview(shell,columns=('time','start','end','score'),
+            show='headings',selectmode='extended')
+        for col,label in (('time','PEAK TIME'),('start','CLIP START'),
+                          ('end','CLIP END'),('score','ACTIVITY SCORE')):
+            self.table.heading(col,text=label)
+            self.table.column(col,width=110,stretch=True)
+        self.table.pack(fill='both',expand=True,side='left')
+        ttk.Scrollbar(shell,command=self.table.yview).pack(side='right',fill='y')
+        self.table.bind('<<TreeviewSelect>>',lambda event:self._set_selected_status())
+
+    def _make_shorts(self):
+        page=self.pages['Shorts']
+        self._label(page,'02 • SHORTS GENERATOR',15,ACCENT,True).pack(anchor='w')
+        self._label(page,'One vertical 9:16 MP4 from the strongest selected highlights. '
+            'Keeps full gameplay visible over a blurred background.',
+            10,TEXT).pack(anchor='w',pady=(12,18))
+        line=tk.Frame(page,bg=BG)
+        line.pack(fill='x',pady=8)
+        self._label(line,'Target duration:',10,ACCENT2,True).pack(side='left')
+        ttk.Combobox(line,textvariable=self.shorts_seconds,
+            values=('30','45','60','90'),state='readonly',width=9).pack(
+            side='left',padx=9)
+        self._label(line,'seconds',9,MUTED).pack(side='left')
+        tk.Checkbutton(page,text='Sync soundtrack energy peak with montage opening',
+            variable=self.music_sync_var,bg=BG,fg=TEXT,
+            selectcolor=CARD2,activebackground=BG).pack(anchor='w',pady=10)
+        self._button(page,'EXPORT VERTICAL SHORT (MP4)',self.export_short,True).pack(
+            fill='x',pady=(20,10))
+        self._label(page,'One clip montage + JSON cut manifest. Your Full Run remains untouched.',
+            9,MUTED).pack(anchor='w')
+
+    def _make_cinematic(self):
+        page=self.pages['Cinematic']
+        self._label(page,'03 • CINEMATIC DIRECTOR — EFFECTS BETA',
+            15,ACCENT,True).pack(anchor='w')
+        self._label(page,'Optional standalone montage with slow-motion emphasis, zoom, '
+            'subtle impact shake and stronger contrast.',
+            10,TEXT).pack(anchor='w',pady=(14,15))
+        row=tk.Frame(page,bg=BG)
+        row.pack(fill='x',pady=7)
+        self._label(row,'Montage duration:',10,ACCENT2,True).pack(side='left')
+        ttk.Combobox(row,textvariable=self.cinematic_seconds,
+            values=('30','45','60','90'),state='readonly',width=9).pack(side='left',padx=10)
+        self._label(row,'Effect strength:',10,ACCENT2,True).pack(side='left',padx=(20,0))
+        ttk.Combobox(row,textvariable=self.cinematic_strength,
+            values=('Low','Medium','High'),state='readonly',width=12).pack(side='left',padx=10)
+        self._button(page,'EXPORT CINEMATIC MONTAGE (MP4)',
+            self.export_cinematic,True).pack(fill='x',pady=(22,10))
+        self._label(page,'This beta uses FFmpeg effects rather than generative AI. '
+            'Speed ramps and learned dodge/burst classification are later steps.',
+            9,YELLOW).pack(anchor='w')
+
+    def _make_thumbnail(self):
+        page=self.pages['Thumbnail']
+        self._label(page,'04 • THUMBNAIL STUDIO',15,ACCENT,True).pack(anchor='w')
+        self._label(page,'Extract a dramatic frame at a selected highlight and create '
+            'a separate 1280×720 PNG with editable text.',
+            10,TEXT).pack(anchor='w',pady=(14,14))
+        for label,var in (('MAIN TITLE',self.thumb_title),
+                          ('SUBTITLE',self.thumb_subtitle)):
+            self._label(page,label,9,ACCENT2,True).pack(anchor='w',pady=(7,3))
+            self._entry(page,var).pack(fill='x',ipady=10)
+        self._button(page,'EXPORT THUMBNAIL (PNG)',
+            self.export_thumbnail,True).pack(fill='x',pady=(25,6))
+        self._label(page,'Uses the selected highlight time, or 5 seconds if no highlights are selected.',
+            9,MUTED).pack(anchor='w')
+
+    def _make_music_sync(self):
+        page=self.pages['Music Sync']
+        self._label(page,'05 • MUSIC ENERGY / BEAT SYNCHRONIZATION',
+            15,ACCENT,True).pack(anchor='w')
+        self._label(page,'Analyze the selected MP3 and make a new, beat-aligned video copy. '
+            'Current Full Run audio is never overwritten.',
+            10,TEXT).pack(anchor='w',pady=(14,12))
+        self._button(page,'ANALYZE MUSIC PEAKS',self.analyze_beats).pack(
+            anchor='w',pady=(0,8))
+        self.beats_label=self._label(page,'No music analyzed yet',10,MUTED)
+        self.beats_label.pack(anchor='w',pady=(2,15))
+        self._button(page,'EXPORT BEAT-ALIGNED COPY (MP4)',
+            self.export_music_sync,True).pack(fill='x',pady=(12,10))
+        self._label(page,'Energy peaks are estimated from audio loudness; precise musical beat '
+            'transcription and cut-to-beat are still future upgrades.',
+            9,YELLOW).pack(anchor='w')
+
+    def _make_vsr(self):
+        page=self.pages['RealBasicVSR + EGVSR']
+        self._label(page,'06 • NEURAL VIDEO RESTORATION / A-B LAB',
+            14,ACCENT,True).pack(anchor='w')
+        self._label(page,'Real neural inference only: official RealBasicVSR script or '
+            'a configured EGVSR video adapter. No Lanczos masquerading as AI.',
+            9,YELLOW).pack(anchor='w',pady=(9,14))
+        model_row=tk.Frame(page,bg=BG)
+        model_row.pack(fill='x',pady=4)
+        self._label(model_row,'Select model:',10,ACCENT2,True).pack(side='left')
+        ttk.Combobox(model_row,textvariable=self.vsr_model,
+            values=('RealBasicVSR','EGVSR'),state='readonly',width=20).pack(
+            side='left',padx=12)
+        for title,var,action in (
+            ('MODEL REPOSITORY FOLDER',self.vsr_repo,self.choose_vsr_repo),
+            ('MODEL WEIGHTS (.pth)',self.vsr_weights,self.choose_vsr_weights),
+            ('MODEL PYTHON / CUDA ENVIRONMENT',self.vsr_python,self.choose_vsr_python)):
+            line=tk.Frame(page,bg=BG)
+            line.pack(fill='x',pady=4)
+            self._label(line,title,9,ACCENT2).pack(anchor='w')
+            controls=tk.Frame(line,bg=BG)
+            controls.pack(fill='x')
+            self._entry(controls,var).pack(side='left',fill='x',expand=True,ipady=6)
+            self._button(controls,'Browse',action).pack(side='right',padx=(7,0))
+        tk.Label(page,textvariable=self.vsr_status,bg=BG,fg=YELLOW,
+            font=('Segoe UI',9),wraplength=960,justify='left',anchor='w').pack(
+            fill='x',pady=(12,8))
+        row=tk.Frame(page,bg=BG)
+        row.pack(fill='x',pady=(8,5))
+        self._button(row,'CHECK MODEL SETUP',self.check_vsr).pack(side='left')
+        self._button(row,'RENDER REAL MODEL A/B • FIRST 8 SECONDS',
+            self.preview_vsr,True).pack(side='right')
+        self._label(page,'EGVSR requires a compatible cazy_egvsr_video.py wrapper '
+            'in its model folder; the original research code does not take video files directly.',
+            9,MUTED).pack(anchor='w',pady=(15,0))
+
+    def _make_bugs(self):
+        page=self.pages['Bug Notes']
+        self._label(page,'07 • TEST EVERYTHING / WRITE BUG NOTES',
+            15,ACCENT,True).pack(anchor='w')
+        self._label(page,'Edit this checklist freely, then save one Markdown report.',
+            9,TEXT).pack(anchor='w',pady=(6,10))
+        self.bug_editor=tk.Text(page,bg=CARD2,fg=TEXT,insertbackground=TEXT,
+            relief='flat',wrap='word',font=('Consolas',10),undo=True)
+        self.bug_editor.pack(fill='both',expand=True)
+        self.bug_editor.insert('1.0',"""# Cazy Studio — All-in-One Creative Lab Test Notes
+
+## Your PC / version
+- Installed Studio version:
+- Test recording:
+- Date:
+
+## [ ] Existing Full Run + random MP3 music
+- Result:
+- Bug / steps to reproduce:
+
+## [ ] Music Hunter search + batch conversion
+- Result:
+- Bug / steps to reproduce:
+
+## [ ] Highlight Finder
+- Do candidate moments match the real fights?
+- Result / bug:
+
+## [ ] Shorts Generator (9:16)
+- Export success? Video/audio? Cropping?
+- Bug / steps:
+
+## [ ] Cinematic Director
+- Slow motion, zoom, camera movement smooth?
+- Bug / steps:
+
+## [ ] Thumbnail Studio
+- Frame choice / text / output:
+- Bug / steps:
+
+## [ ] Music Sync
+- Correct soundtrack? Beat timing? Original audio?
+- Bug / steps:
+
+## [ ] RealBasicVSR + EGVSR readiness / A-B
+- Models installed? CUDA? Inference speed? Visual quality?
+- Bug / steps:
+
+## Other issues / expected vs actual
+
+""")
+        self._button(page,'SAVE ALL BUG NOTES (.MD)',
+            self.save_bug_notes,True).pack(fill='x',pady=(10,0))
+
+    def choose_source(self):
+        filename=filedialog.askopenfilename(parent=self,title='Choose gameplay or Full Run',
+                filetypes=[('Video recordings','*.mp4 *.mkv *.mov *.avi *.webm'),
+                           ('All files','*.*')])
+        if filename:
+            self.source_var.set(filename)
+            self._highlights=[]
+            self._result=None
+            self.table.delete(*self.table.get_children())
+            self.status_var.set('New video selected. Analyze its highlights first.')
+
+    def choose_music(self):
+        filename=filedialog.askopenfilename(parent=self,title='Select soundtrack',
+                filetypes=[('Audio','*.mp3 *.wav *.m4a *.flac *.ogg'),
+                           ('All files','*.*')])
+        if filename:self.music_var.set(filename)
+
+    def choose_destination(self):
+        folder=filedialog.askdirectory(parent=self,title='Choose creative exports and bug notes folder')
+        if folder:self.destination_var.set(folder)
+
+    def choose_vsr_repo(self):
+        folder=filedialog.askdirectory(parent=self,title='Locate installed model repository')
+        if folder:self.vsr_repo.set(folder)
+
+    def choose_vsr_weights(self):
+        filename=filedialog.askopenfilename(parent=self,title='Choose pretrained .pth checkpoint',
+                filetypes=[('PyTorch checkpoints','*.pth *.pt'),('All files','*.*')])
+        if filename:self.vsr_weights.set(filename)
+
+    def choose_vsr_python(self):
+        filename=filedialog.askopenfilename(parent=self,title='Choose model CUDA Python executable',
+            filetypes=[('Python executable','python.exe python3.exe'),('All files','*.*')])
+        if filename:self.vsr_python.set(filename)
+
+    def _busy_state(self,flag):
+        self._busy=bool(flag)
+        self.cancel_button.configure(state='normal' if flag else 'disabled')
+        self.analyze_button.configure(state='disabled' if flag else 'normal')
+
+    def _work(self,kind,action):
+        if self._busy:return
+        self._busy_state(True)
+        self.progress_var.set(0.)
+        def run():
+            try:
+                result=action()
+                self._events.put((kind,result))
+            except Exception as exc:
+                self._events.put(('error',str(exc)))
+        threading.Thread(target=run,daemon=True).start()
+
+    def _progress(self,pct,msg):
+        self._events.put(('progress',(pct,msg)))
+
+    def _selected_highlights(self):
+        selection=self.table.selection()
+        return [self._highlights[int(i)] for i in sorted(selection,key=int)
+                if 0<=int(i)<len(self._highlights)]
+
+    def _highlight_anchor(self):
+        selected=self._selected_highlights()
+        return float(selected[0]['at']) if selected else 0.
+
+    def _set_selected_status(self):
+        if not self._busy and self._highlights:
+            self.status_var.set(f'{len(self._selected_highlights())} of '
+                f'{len(self._highlights)} visual highlights selected. '
+                'Shorts and Cinematic tools will use this selection.')
+
+    def select_all(self):
+        rows=self.table.get_children()
+        if rows:self.table.selection_set(*rows)
+        self._set_selected_status()
+
+    def reuse_highlights(self):
+        other=getattr(self.owner,'_highlight_finder_window',None)
+        report=getattr(other,'_report',None)
+        if (not isinstance(report,dict) or
+                report.get('source')!=self.source_var.get()):
+            messagebox.showinfo('Creative Lab',
+                'Open Highlight Finder and analyze this same video first, or click '
+                'ANALYZE VISUAL HIGHLIGHTS here.',parent=self)
+            return
+        self._show_highlights(report)
+
+    def _show_highlights(self,report):
+        self._result=report
+        self._highlights=list(report.get('highlights') or [])
+        self.table.delete(*self.table.get_children())
+        for i,item in enumerate(self._highlights):
+            self.table.insert('',tk.END,iid=str(i),values=(
+                f'{item["at"]:.2f}s',f'{item["start"]:.2f}s',
+                f'{item["end"]:.2f}s',f'{item["score"]:.1f}'))
+        self.select_all()
+        self.status_var.set(f'{len(self._highlights)} visual candidates ready. '
+                            'Choose Shorts, Cinematic or Thumbnail to export.')
+
+    def analyze(self):
+        filename=self.source_var.get().strip()
+        if not Path(filename).is_file():
+            messagebox.showerror('Creative Lab','Choose an existing video file.',parent=self)
+            return
+        self._cancel.clear()
+        self._work('highlights',lambda:quality_engine.highlight_finder_scan(
+            filename,limit=20,clip_seconds=8.,cancel=self._cancel,
+            progress=self._progress))
+
+    def _check_source(self,need_highlights=False):
+        if not Path(self.source_var.get()).is_file():
+            messagebox.showerror('Creative Lab','Select an existing video first.',parent=self)
+            return False
+        if need_highlights and not self._selected_highlights():
+            messagebox.showinfo('Creative Lab',
+                'Analyze visual highlights in the Highlights tab first.',parent=self)
+            self.tabs.select(self.pages['Highlights'])
+            return False
+        return True
+
+    def _render_montage(self,mode):
+        if not self._check_source(True):return
+        length=self.shorts_seconds.get() if mode=='shorts' else self.cinematic_seconds.get()
+        try:seconds=float(length)
+        except ValueError:
+            messagebox.showerror('Creative Lab','Choose a valid montage length.',parent=self)
+            return
+        self._cancel.clear()
+        music=self.music_var.get()
+        self.status_var.set('Exporting separate '+mode+' video; Full Run will not change.')
+        self._work(mode,lambda:quality_engine.creative_export_montage(
+            self.source_var.get(),self._selected_highlights(),self.destination_var.get(),
+            mode=mode,target_seconds=seconds,music=music,
+            beat_sync=self.music_sync_var.get(),
+            strength=self.cinematic_strength.get(),progress=self._progress,
+            cancel=self._cancel))
+
+    def export_short(self):
+        self._render_montage('shorts')
+
+    def export_cinematic(self):
+        self._render_montage('cinematic')
+
+    def export_thumbnail(self):
+        if not self._check_source():return
+        anchor=self._highlight_anchor() or 5.
+        self._work('thumbnail',lambda:quality_engine.creative_export_thumbnail(
+            self.source_var.get(),anchor,self.destination_var.get(),
+            self.thumb_title.get(),self.thumb_subtitle.get()))
+
+    def analyze_beats(self):
+        music=self.music_var.get()
+        if not Path(music).is_file():
+            messagebox.showinfo('Music Sync','Choose a music track first.',parent=self)
+            return
+        self._work('beats',lambda:quality_engine._creative_audio_peaks(
+            music,progress=self._progress))
+
+    def export_music_sync(self):
+        if not self._check_source():return
+        if not Path(self.music_var.get()).is_file():
+            messagebox.showinfo('Music Sync','Choose a music track first.',parent=self)
+            return
+        self._cancel.clear()
+        self._work('sync',lambda:quality_engine.creative_music_sync_copy(
+            self.source_var.get(),self.music_var.get(),
+            self.destination_var.get(),anchor=self._highlight_anchor(),
+            progress=self._progress,cancel=self._cancel))
+
+    def check_vsr(self):
+        result=quality_engine.creative_vsr_preflight(
+            self.vsr_model.get(),self.vsr_repo.get(),self.vsr_weights.get(),
+            self.vsr_python.get())
+        self.vsr_status.set(result['message'])
+        self.status_var.set(result['status'])
+        return result
+
+    def preview_vsr(self):
+        if not self._check_source():return
+        readiness=self.check_vsr()
+        if not readiness['ready']:
+            messagebox.showinfo('VSR Model Setup',readiness['message'],parent=self)
+            return
+        self._cancel.clear()
+        self._work('vsr',lambda:quality_engine.creative_vsr_ab_preview(
+            self.source_var.get(),self.destination_var.get(),
+            self.vsr_model.get(),self.vsr_repo.get(),self.vsr_weights.get(),
+            self.vsr_python.get(),seconds=8,
+            progress=self._progress,cancel=self._cancel))
+
+    def save_bug_notes(self):
+        report=self.bug_editor.get('1.0','end-1c').strip()
+        if not report:
+            messagebox.showinfo('Bug Notes','Write a bug or test note first.',parent=self)
+            return
+        try:
+            target=quality_engine.creative_bug_report_path(self.destination_var.get(),
+                title='Cazy_Studio_Creative_Test_Report')
+            target.write_text(report+'\n',encoding='utf-8')
+        except (OSError,ValueError) as exc:
+            messagebox.showerror('Bug Notes',str(exc),parent=self)
+            return
+        self.status_var.set('Bug notes saved: '+str(target))
+        messagebox.showinfo('Bug Notes','Saved your notes to:\n'+str(target),parent=self)
+
+    def cancel(self):
+        self._cancel.set()
+        self.status_var.set('Cancellation requested. Current media stage is stopping.')
+
+    def _poll(self):
+        if not self.winfo_exists():return
+        try:
+            while True:
+                kind,data=self._events.get_nowait()
+                if kind=='progress':
+                    pct,msg=data
+                    self.progress_var.set(max(0.,min(100.,float(pct)*100)))
+                    self.status_var.set(str(msg))
+                    continue
+                self._busy_state(False)
+                if kind=='highlights':
+                    self._show_highlights(data)
+                elif kind=='beats':
+                    self._beats=list(data)
+                    offset=quality_engine.creative_music_offset(
+                        self._beats,self._highlight_anchor())
+                    self.beats_label.configure(text=
+                        f'{len(self._beats)} musical peaks detected. '
+                        f'Estimated soundtrack offset: {offset:.2f}s')
+                    self.status_var.set('Music energy analysis completed.')
+                elif kind in ('shorts','cinematic','sync'):
+                    self.progress_var.set(100)
+                    output=data['video']
+                    self.status_var.set('Created: '+str(output))
+                    messagebox.showinfo('Creative Lab','Export complete:\n'+str(output),parent=self)
+                elif kind=='thumbnail':
+                    self.status_var.set('Thumbnail saved: '+data['image'])
+                    messagebox.showinfo('Creative Lab','Thumbnail saved:\n'+data['image'],parent=self)
+                elif kind=='vsr':
+                    self.progress_var.set(100)
+                    self.vsr_status.set('Model inference completed; comparison video: '+data['comparison'])
+                    self.status_var.set(self.vsr_status.get())
+                    messagebox.showinfo('VSR A/B','Open this comparison video:\n'+
+                        data['comparison'],parent=self)
+                elif kind=='error':
+                    self.status_var.set('Creative Lab error: '+str(data)[:750])
+                    messagebox.showerror('Creative Lab',str(data)[-1600:],parent=self)
+        except queue.Empty:
+            pass
+        self.after(150,self._poll)
 
 
 class HighlightFinderWindow(tk.Toplevel):
