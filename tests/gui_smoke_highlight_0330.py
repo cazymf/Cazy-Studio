@@ -72,7 +72,9 @@ with tempfile.TemporaryDirectory() as temp:
         win._poll()
         win.update()
         assert win._preview_photo is not None
-        assert win.preview_label.winfo_height()>100
+        assert win._preview_window.winfo_exists()
+        assert win._preview_window.winfo_width()>=640
+        win._preview_window.destroy()
         seen=[]
         win._work=lambda kind,action:seen.append(kind)
         previous=filedialog.askdirectory
