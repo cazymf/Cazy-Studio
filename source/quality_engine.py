@@ -1744,7 +1744,7 @@ def _cazy_ocr_decoder_candidates():
         except (OSError, RuntimeError):
             pass
     if os.name == 'nt':
-        legacy = _legacy_ffmpeg_path()
+        legacy = _legacy_ffmpeg_cache_path()
         if legacy.is_file():
             candidates.append(str(legacy))
     system = shutil.which('ffmpeg')
