@@ -2800,6 +2800,7 @@ class CreativeLabWindow(tk.Toplevel):
 ## Other issues / expected vs actual
 
 """)
+        self.bug_editor.insert('end',f'\nStudio version: {APP_VERSION}\n')
         self._button(page,'SAVE ALL BUG NOTES (.MD)',
             self.save_bug_notes,True).pack(fill='x',pady=(10,0))
 
