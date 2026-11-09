@@ -104,7 +104,7 @@ class AutoDirectorTests(unittest.TestCase):
         self.assertIn('MISSING FILE', ui)
         self.assertNotIn('self.visibility_var', ui)
         self.assertNotIn("self.add_folder", ui)
-        self.assertIn('No YouTube connection or publishing', ui)
+        self.assertIn('Music Hunter is an optional online tool; no publishing.', ui)
 
     def test_version_bump_and_valid_python_ast(self):
         self.assertIn("'0.3.26'", VERSION.read_text(encoding='utf-8'))
