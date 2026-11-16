@@ -42,7 +42,7 @@ class IsolatedOCRDecoderTests(unittest.TestCase):
                                    return_value=legacy), \
                  mock.patch.object(quality.shutil,'which',return_value=None):
                 candidates=quality._cazy_ocr_decoder_candidates()
-        self.assertEqual(candidates,['bundled-ffmpeg.exe',str(legacy)])
+        self.assertEqual(candidates,[str(legacy),'bundled-ffmpeg.exe'])
 
     def test_main_app_version_is_not_hardcoded(self):
         app=(ROOT/'source'/'app.py').read_text(encoding='utf-8')

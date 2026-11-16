@@ -1735,18 +1735,18 @@ class _CazyOCRDecoderFailure(RuntimeError):
 
 
 def _cazy_ocr_decoder_candidates():
-    """Prefer the bundled decoder; retry with installed alternatives if it exits."""
+    """Prefer the compatible Windows build for OCR; retain other fallbacks."""
     candidates = []
+    if os.name == 'nt':
+        legacy = _legacy_ffmpeg_cache_path()
+        if legacy.is_file():
+            candidates.append(str(legacy))
     get_ffmpeg = getattr(engine, 'get_ffmpeg', None)
     if callable(get_ffmpeg):
         try:
             candidates.append(str(get_ffmpeg()))
         except (OSError, RuntimeError):
             pass
-    if os.name == 'nt':
-        legacy = _legacy_ffmpeg_cache_path()
-        if legacy.is_file():
-            candidates.append(str(legacy))
     system = shutil.which('ffmpeg')
     if system:
         candidates.append(system)
@@ -1953,7 +1953,10 @@ def scan_abyss_recording(path,references=None,progress=None,cancel=None,
     if not executable:
         raise RuntimeError('Text detection requires Tesseract OCR. Use Locate Tesseract in AutoDirector.')
     failures = []
-    for decoder in _cazy_ocr_decoder_candidates():
+    decoders = _cazy_ocr_decoder_candidates()
+    compatibility_attempted = any(
+        Path(item) == _legacy_ffmpeg_cache_path() for item in decoders)
+    for decoder in decoders:
         try:
             return _cazy_scan_abyss_external(
                 footage, executable, decoder, progress, cancel,
@@ -1962,6 +1965,20 @@ def scan_abyss_recording(path,references=None,progress=None,cancel=None,
             failures.append(f'{Path(decoder).name}: {exc}')
             if cancel is not None and cancel.is_set():
                 raise RuntimeError('Scan cancelled') from exc
+            # A second invocation of the same bundled binary is not a fallback.
+            # Fetch the existing checksum-verified compatibility build only if
+            # no copy was available when this scan started.
+            if os.name == 'nt' and not compatibility_attempted:
+                compatibility_attempted = True
+                try:
+                    compatible = _ensure_legacy_ffmpeg(cancel=cancel)
+                except Exception as setup_error:
+                    if cancel is not None and cancel.is_set():
+                        raise RuntimeError('Scan cancelled') from setup_error
+                    failures.append('Compatible FFmpeg setup failed: ' + str(setup_error))
+                else:
+                    if compatible not in decoders:
+                        decoders.append(compatible)
     raise RuntimeError('All FFmpeg OCR decoders failed. Cazy Studio is still running.\n'
                        + '\n'.join(failures))
 
