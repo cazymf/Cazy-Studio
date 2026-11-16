@@ -2,11 +2,17 @@
 import os
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'source'))
+# This updater repository contains incremental app files; engine.py is supplied
+# by the installed base application. Match the existing isolated test harness.
+engine = sys.modules.setdefault('engine', types.ModuleType('engine'))
+if not hasattr(engine, 'MediaInfo'):
+    engine.MediaInfo = type('MediaInfo', (object,), {})
 import quality_engine as q
 
 

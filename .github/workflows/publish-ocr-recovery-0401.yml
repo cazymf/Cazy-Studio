@@ -1,4 +1,5 @@
 name: Publish Cazy Studio v0.4.1 OCR decoder recovery
+# Revision 2: use the incremental repository's isolated engine test harness.
 on:
   push:
     branches: [main]
