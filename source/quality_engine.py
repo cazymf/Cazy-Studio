@@ -1670,6 +1670,9 @@ def build_abyss_segments(events,source,duration,first_chamber=1):
             state="waiting";first_start=first_end=second_start=switch_at=None
             continue
         if kind=="start":
+            if str(event.get('evidence', '')).startswith('Active challenge countdown'):
+                notes.append('Start prompt missed near %.2fs; recovered from the running '
+                             'challenge timer. Verify this cut boundary.' % at)
             if state=="waiting":
                 first_start=max(0.,at-2.0)
                 state="first"
@@ -1850,6 +1853,42 @@ def _cazy_ocr_frame_stream(path, executable, width, height, sample_fps, cancel=N
             proc.stdout.close()
 
 
+def _cazy_read_challenge_timer(frame, executable, cancel=None):
+    """Read the active Abyss countdown when a brief interaction prompt is missed.
+
+    A single reading is only a candidate. The scanner must see this clock
+    counting down before treating it as evidence that gameplay has started.
+    """
+    import cv2
+    if cancel is not None and cancel.is_set():
+        raise RuntimeError('Scan cancelled')
+    h, w = frame.shape[:2]
+    crop = frame[int(.115*h):int(.17*h), int(.48*w):int(.545*w)]
+    if not crop.size:
+        return None
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    gray = cv2.resize(gray, None, fx=3., fy=3., interpolation=cv2.INTER_CUBIC)
+    ok, png = cv2.imencode('.png', gray)
+    if not ok:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, 'stdin', 'stdout', '--psm', '7', '-l', 'eng',
+             '-c', 'tessedit_char_whitelist=0123456789:'],
+            input=png.tobytes(), capture_output=True, timeout=7,
+            creationflags=_cazy_subprocess_flags())
+    except subprocess.TimeoutExpired:
+        return None
+    if result.returncode:
+        return None
+    text = result.stdout.decode('utf-8', 'replace')
+    match = re.fullmatch(r'\s*(\d{1,2})\s*:\s*(\d{2})\s*', text)
+    if not match or int(match[2]) >= 60:
+        return None
+    seconds = int(match[1])*60 + int(match[2])
+    return seconds if 0 < seconds <= 600 else None
+
+
 def _cazy_scan_abyss_external(path, executable, decoder, progress, cancel,
                               sample_seconds, detail):
     """OCR is unchanged; only the unsafe native video decoding is replaced."""
@@ -1868,6 +1907,7 @@ def _cazy_scan_abyss_external(path, executable, decoder, progress, cancel,
     next_start_ocr = 0.
     last_transition_ocr = -100.
     want_start = True
+    pending_timer = None
     events = []
     last_kind = None
     last_seen = -100.
@@ -1881,6 +1921,7 @@ def _cazy_scan_abyss_external(path, executable, decoder, progress, cancel,
                 raise RuntimeError('Scan cancelled')
             profile = _abyss_screen_profile(frame, cv2)
             kind, confidence, evidence = None, 0., ''
+            event_at = t
             if (want_start and not profile['black_blank']
                     and not profile['transition']
                     and t >= next_start_ocr-.0001):
@@ -1902,9 +1943,29 @@ def _cazy_scan_abyss_external(path, executable, decoder, progress, cancel,
                 if immediate_transition:
                     last_transition_ocr = t
                 next_regular_ocr = t + ocr_every
+                if (not kind and want_start and not profile['transition']
+                        and not profile['result']):
+                    seconds = _cazy_read_challenge_timer(frame, executable, cancel)
+                    if seconds is not None:
+                        if pending_timer is not None:
+                            earlier_at, earlier_seconds = pending_timer
+                            elapsed = t - earlier_at
+                            decrease = earlier_seconds - seconds
+                            if (.25 <= elapsed <= 4. and
+                                    0 < decrease <= elapsed + 1.5):
+                                kind, confidence, event_at = 'start', .93, earlier_at
+                                evidence = ('Active challenge countdown %02d:%02d → %02d:%02d; '
+                                            'brief start prompt missed; verify cut boundary' %
+                                            (earlier_seconds//60, earlier_seconds%60,
+                                             seconds//60, seconds%60))
+                            elif seconds != earlier_seconds or elapsed > 4.:
+                                pending_timer = (t, seconds)
+                        else:
+                            pending_timer = (t, seconds)
             if kind:
+                pending_timer = None
                 if kind != last_kind or t-last_seen > 4.:
-                    events.append({'at': round(t, 2), 'kind': kind,
+                    events.append({'at': round(event_at, 2), 'kind': kind,
                                    'confidence': confidence, 'evidence': evidence})
                 last_kind, last_seen = kind, t
                 if kind == 'start':

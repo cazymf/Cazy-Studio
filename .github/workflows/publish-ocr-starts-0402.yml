@@ -1,0 +1,107 @@
+name: Publish Cazy Studio v0.4.2 OCR start recovery
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-ocr-starts-0402.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: publish-ocr-recovery-0402
+  cancel-in-progress: false
+jobs:
+  windows-recovery:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Test Windows decoder selection, fallback and cancellation
+        run: python -m unittest discover -s tests -p test_ocr_decoder_recovery.py -v
+      - name: Test missed start recovery and reject frozen timers
+        run: python -m unittest discover -s tests -p test_ocr_start_recovery.py -v
+  publish:
+    needs: windows-recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install test dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet opencv-python-headless numpy pillow
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg tesseract-ocr tesseract-ocr-eng
+      - name: Run media, OCR and GUI regression tests
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_*.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_037.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_export_0323.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_music_hunter_0328.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_highlight_0330.py
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_creative_0400.py
+      - name: Build ZIP and verify install and rollback using v0.4.1 updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/base release/stage release/out
+          gh release download v0.4.1 --repo "$GITHUB_REPOSITORY" --pattern 'Cazy_Studio_v0_4_1_Update.zip' --dir release/base
+          cp source/app.py source/quality_engine.py source/quality_ui.py source/update_core.py source/version.py release/stage/
+          PYTHONPATH=source python - <<'PY'
+          import importlib.util, tempfile, zipfile
+          from pathlib import Path
+          import update_core
+          root = Path('release')
+          previous = root / 'base/Cazy_Studio_v0_4_1_Update.zip'
+          archive = root / 'out/Cazy_Studio_v0_4_2_Update.zip'
+          manifest = update_core.build_update_zip(root / 'stage', archive, '0.4.2')
+          approved = {'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          assert set(manifest['files']) == approved
+          with tempfile.TemporaryDirectory() as temp:
+              folder = Path(temp)
+              legacy_file = folder / 'legacy.py'
+              with zipfile.ZipFile(previous) as z:
+                  legacy_file.write_bytes(z.read('update_core.py'))
+              spec = importlib.util.spec_from_file_location('legacy_updater', legacy_file)
+              legacy = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(legacy)
+              legacy.inspect_update_zip(archive, '0.4.2')
+              installed = folder / 'installation'
+              installed.mkdir()
+              with zipfile.ZipFile(previous) as z:
+                  for name in legacy.inspect_update_zip(previous, '0.4.1')['files']:
+                      (installed / name).write_bytes(z.read(name))
+              sentinel = installed / 'recording.mp4'
+              sentinel.write_bytes(b'preserve-user-files')
+              legacy.apply_update_zip(archive, installed, '0.4.2')
+              for name in approved:
+                  assert (installed / name).read_bytes() == (root / 'stage' / name).read_bytes()
+              assert sentinel.read_bytes() == b'preserve-user-files'
+              legacy.rollback_latest(installed)
+              assert (installed / 'version.py').read_text().strip() == "APP_VERSION = '0.4.1'"
+              assert sentinel.read_bytes() == b'preserve-user-files'
+          print('v0.4.1 updater verified installation and rollback of v0.4.2')
+          PY
+      - name: Publish verified updater asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cat > release/notes.md <<'NOTES'
+          Fixes successful Abyss runs producing only one chamber pair when brief Start Challenge interaction prompts are missed. The scanner now recovers a missed start only after two OCR readings confirm that the active challenge timer is counting down. Frozen, stale or implausible timer readings do not count as starts, and failed or incomplete chambers remain excluded.
+
+          Recovered boundaries remain marked for review. Existing FFmpeg decoder crash recovery is retained. Previously saved scans need Scan Again once to recover the missing starts; subsequent reviews can reuse the saved cuts.
+
+          Publication is gated on Windows start/decoder recovery tests, media and OCR regression tests, GUI smoke tests, and installation/rollback checks using the v0.4.1 updater. The affected local recording is also tested end to end before publishing.
+          NOTES
+          gh release create v0.4.2 release/out/Cazy_Studio_v0_4_2_Update.zip \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title 'Cazy Studio v0.4.2 — OCR start recovery' --notes-file release/notes.md --latest
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Cazy_Studio_v0_4_2_Update
+          path: release/out/Cazy_Studio_v0_4_2_Update.zip
+          if-no-files-found: error
