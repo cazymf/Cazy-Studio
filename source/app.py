@@ -196,7 +196,10 @@ class Studio(tk.Tk):
                                    relief='flat',activestyle='none',font=('Segoe UI',10),exportselection=False)
         self.media_list.pack(fill='both',expand=True,padx=9,pady=(0,8))
         self.media_list.bind('<Double-Button-1>',lambda e:self.add_selected_media())
-        self._button(self.media_panel,'♪ Set Background Music',self.pick_music,small=True).pack(fill='x',padx=12,pady=(4,7))
+        self._button(self.media_panel,'♪ Set Background Music',self.pick_music,small=True).pack(fill='x',padx=12,pady=(4,3))
+        self._button(self.media_panel,'♫ RANDOM SONG',self.pick_random_music,True,small=True).pack(fill='x',padx=12,pady=3)
+        self._button(self.media_panel,'♫ MUSIC HUNTER',self.open_editor_music_hunter,small=True).pack(fill='x',padx=12,pady=3)
+        self._button(self.media_panel,'Choose Shared Music Folder',self.choose_editor_music_folder,small=True).pack(fill='x',padx=12,pady=(3,7))
         self.music_status=self._label(self.media_panel,'No background audio',9,MUTED)
         self.music_status.pack(fill='x',padx=14,pady=(0,16))
 
@@ -385,17 +388,58 @@ class Studio(tk.Tk):
         except Exception as exc:
             messagebox.showerror('Cannot import media',str(exc))
 
+    def _shared_music_folder(self):
+        return self.autodirector_view.music_var.get() or str(quality_engine.music_hunter_library_path())
+
+    def choose_editor_music_folder(self):
+        self.autodirector_view.choose_music()
+        self.status_var.set(self.autodirector_view.status_var.get())
+
+    def open_editor_music_hunter(self):
+        # Reuse the actual AutoDirector window and its download callbacks.
+        # Both workspaces always point at the same saved music collection.
+        self.autodirector_view.open_music_hunter()
+
     def pick_music(self):
-        p=filedialog.askopenfilename(title='Choose background music',
+        folder=self._shared_music_folder()
+        p=filedialog.askopenfilename(parent=self,title='Choose background music',
+               initialdir=folder if Path(folder).is_dir() else str(Path.home()),
                filetypes=[('Audio','*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.opus'),('All files','*.*')])
-        if not p:return
+        if p:self._set_editor_music(p)
+
+    def _set_editor_music(self,p,reset_offset=False):
+        p=str(p)
         self._snapshot()
         self.project.music_path=p
+        if reset_offset:
+            self.project.music_offset=0.0
         if p not in self.media_paths:
             self.media_paths.append(p)
             self.media_list.insert('end','♫  '+Path(p).name[:32])
         self._refresh_all()
-        self.status_var.set('Background music set.')
+        self.status_var.set('Background music: '+Path(p).name)
+
+    def pick_random_music(self):
+        view=self.autodirector_view
+        folder=self._shared_music_folder()
+        try:
+            song=_editor_choose_random_track(folder,self.project.music_path,
+                view.state.get('recent_music',''),view.avoid_var.get())
+        except ValueError as exc:
+            messagebox.showinfo('Random music',str(exc)+
+                '\n\nChoose Shared Music Folder or use Music Hunter to add tracks.',parent=self)
+            return
+        old_folder=view.music_var.get()
+        old_recent=view.state.get('recent_music','')
+        view.music_var.set(folder)
+        view.state['recent_music']=song
+        if not view.save():
+            view.music_var.set(old_folder)
+            view.state['music_folder']=old_folder
+            view.state['recent_music']=old_recent
+            return
+        self._set_editor_music(song,reset_offset=True)
+        view.refresh()
 
     def _inspector_entry(self, parent, label, value, row, width=18):
         self._label(parent,label,9,MUTED).grid(row=row,column=0,sticky='w',pady=7)
@@ -445,6 +489,8 @@ class Studio(tk.Tk):
         self._label(self.inspect_content,'BACKGROUND MUSIC',10,ACCENT2,True).pack(anchor='w')
         self._label(self.inspect_content,Path(music).name[:32] if music else 'Not set',9,MUTED).pack(anchor='w',pady=(5,13))
         self._button(self.inspect_content,'Choose Audio',self.pick_music,small=True).pack(anchor='w')
+        self._button(self.inspect_content,'Random Shared Song',self.pick_random_music,small=True).pack(anchor='w',pady=3)
+        self._button(self.inspect_content,'Music Hunter',self.open_editor_music_hunter,small=True).pack(anchor='w')
         if music:
             box=tk.Frame(self.inspect_content,bg=CARD)
             box.pack(fill='x',pady=(10,0))
@@ -1212,6 +1258,22 @@ def _autodirector_tracks(folder):
                        if p.is_file() and p.suffix.lower() in _AUTODIRECTOR_MUSIC_EXTS),key=str.casefold)
     except OSError:
         return []
+
+
+def _editor_choose_random_track(folder,current='',recent='',avoid_repeats=True,chooser=None):
+    """Use AutoDirector's exact library; exclude current/recent if alternatives exist."""
+    tracks=_autodirector_tracks(folder)
+    if not tracks:
+        raise ValueError('No compatible music files found in:\n'+str(folder))
+    def key(path):
+        return os.path.normcase(os.path.abspath(path)) if path else ''
+    candidates=tracks
+    if avoid_repeats and len(tracks)>1:
+        without_current=[p for p in tracks if key(p)!=key(current)]
+        candidates=without_current or tracks
+        without_recent=[p for p in candidates if key(p)!=key(recent)]
+        candidates=without_recent or candidates
+    return (chooser or random.choice)(candidates)
 
 
 def _autodirector_prepare(state,chooser=None):
@@ -3340,7 +3402,7 @@ class MusicHunterWindow(tk.Toplevel):
         self.query_var=tk.StringVar(value='epic orchestral boss battle instrumental copyright free')
         self.months_var=tk.StringVar(value='6')
         default=quality_engine.music_hunter_library_path()
-        self.folder_var=tk.StringVar(value=str(default))
+        self.folder_var=tk.StringVar(value=owner.music_var.get() or str(default))
         self.status_var=tk.StringVar(value='Ready. Results are recent uploads; music rights must be verified.')
         self.permission_var=tk.BooleanVar(value=False)
         self.pasted_url_var=tk.StringVar(value='')
