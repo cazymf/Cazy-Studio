@@ -1077,7 +1077,7 @@ class Studio(tk.Tk):
         dialog=tk.Toplevel(self)
         dialog.title('Export Cazy Studio Video')
         dialog.configure(bg=CARD)
-        dialog.geometry('420x380')
+        dialog.geometry('520x600')
         dialog.resizable(False,False)
         dialog.transient(self)
         dialog.grab_set()
@@ -1089,6 +1089,24 @@ class Studio(tk.Tk):
         ttk.Combobox(dialog,state='readonly',values=['24','30','60','120','240'],textvariable=self.fps_var,style='Field.TCombobox').pack(fill='x',padx=20,pady=(3,11))
         self._label(dialog,'Quality',10,MUTED).pack(anchor='w',padx=20)
         ttk.Combobox(dialog,state='readonly',values=['High','Balanced','Smaller File'],textvariable=self.quality_var,style='Field.TCombobox').pack(fill='x',padx=20,pady=(3,14))
+        self._label(dialog,'Editor processing pipeline',10,ACCENT2,True).pack(anchor='w',padx=20)
+        pipeline=tk.StringVar(value='NVIDIA Fast')
+        ttk.Combobox(dialog,state='readonly',values=_EDITOR_RENDER_MODES,
+            textvariable=pipeline,style='Field.TCombobox').pack(fill='x',padx=20,pady=(3,8))
+        self._label(dialog,'AI sampling (only applies to neural upscaling)',9,MUTED).pack(anchor='w',padx=20)
+        ai_sampling=tk.StringVar(value='Every output frame')
+        ttk.Combobox(dialog,state='readonly',values=('Fast (30 FPS)','Balanced (60 FPS)','Every output frame'),
+            textvariable=ai_sampling,style='Field.TCombobox').pack(fill='x',padx=20,pady=(3,8))
+        tk.Label(dialog,text='NVIDIA Fast uses CUDA decode/scale where compatible, NVENC, and CPU fallback. AI modes require the existing RIFE / Real-ESRGAN addons. Captions retain the original renderer.',
+            bg=CARD,fg=MUTED,wraplength=470,justify='left',anchor='w').pack(fill='x',padx=20,pady=(1,8))
+        def setup_ai():
+            installer=Path(__file__).resolve().parent/'Install_AI_Addons.bat'
+            if os.name=='nt' and installer.is_file():
+                if messagebox.askyesno('AI Addons','Install or repair official RIFE and Real-ESRGAN addons?',parent=dialog):
+                    os.startfile(str(installer))
+            else:
+                messagebox.showinfo('AI Addons','Use Quality Lab > AI Addons Setup / Repair.',parent=dialog)
+        self._button(dialog,'AI ADDONS SETUP',setup_ai,small=True).pack(anchor='w',padx=20,pady=(0,7))
         self._label(dialog,f'Estimated output duration: {engine.fmt_time(self.project.duration)}',9,MUTED).pack(anchor='w',padx=20,pady=(0,11))
         def go():
             dest=filedialog.asksaveasfilename(parent=dialog,title='Export to MP4',defaultextension='.mp4',
@@ -1100,10 +1118,10 @@ class Studio(tk.Tk):
             self.project.fps=int(self.fps_var.get())
             self.project.crf={'High':19,'Balanced':23,'Smaller File':27}[self.quality_var.get()]
             dialog.destroy()
-            self._start_export(dest)
+            self._start_export(dest,pipeline.get(),ai_sampling.get())
         self._button(dialog,'EXPORT MP4',go,True).pack(fill='x',padx=20,pady=5)
 
-    def _start_export(self,path):
+    def _start_export(self,path,pipeline='Standard editor',ai_sampling='Every output frame'):
         if self.exporting:return
         self.exporting=True
         self.export_cancel.clear()
@@ -1131,8 +1149,13 @@ class Studio(tk.Tk):
                 if self.export_window.winfo_exists() else None)
         render_project=copy.deepcopy(self.project)
         def worker():
+            last=[0.0]
+            def report(msg,cur,total):
+                last[0]=max(last[0],min(100.,cur/max(1,total)*100))
+                self.jobs.put(('progress',msg,last[0]))
             try:
-                result=engine.render(render_project,path,lambda msg,cur,total:self.jobs.put(('progress',msg,cur/max(1,total)*100)),self.export_cancel)
+                result=_render_editor_pipeline(render_project,path,pipeline,ai_sampling,
+                    report,self.export_cancel)
                 self.jobs.put(('done',result))
             except Exception as exc:self.jobs.put(('error',str(exc)))
         threading.Thread(target=worker,daemon=True).start()
@@ -1182,6 +1205,175 @@ class Studio(tk.Tk):
         self._invalidate_preview_audio()
         self.preview_decoder.close()
         self.destroy()
+
+# ---- Normal Editor: accelerated timeline export / optional genuine AI enhancement ----
+_EDITOR_RENDER_MODES=('NVIDIA Fast','AI Anime (Real-ESRGAN)','AI General (Real-ESRGAN)',
+    'RIFE AI + Anime','Standard editor')
+
+def _editor_encode_args(crf,hardware,master=False):
+    if hardware:
+        return ['-c:v','h264_nvenc','-preset','p4','-rc','vbr','-cq',
+            str(12 if master else crf),'-b:v','0','-g','120','-bf','0']
+    return ['-c:v','libx264','-preset','veryfast' if not master else 'fast',
+            '-crf',str(12 if master else crf),'-g','120','-bf','0']
+
+
+def _editor_cuda_eligible(clip,info,w,h,fps):
+    """Only no-speed-change, matching-aspect, matching-rate sources use zero-copy CUDA."""
+    return (clip.kind=='video' and abs(float(clip.speed)-1)<1e-6
+        and int(info.width)*h==int(info.height)*w
+        and abs(float(info.fps)-fps)<.01)
+
+
+def _editor_clip_command(ff,clip,info,w,h,fps,frames,output,crf,hardware,
+                         cuda=False,master=False):
+    duration=frames/fps
+    cmd=[str(ff),'-hide_banner','-loglevel','error','-nostdin','-y']
+    if cuda:
+        cmd+=['-hwaccel','cuda','-hwaccel_output_format','cuda']
+    if clip.kind=='image':
+        cmd+=['-loop','1','-framerate',str(fps)]
+    else:
+        cmd+=['-ss',f'{float(clip.start):.8f}']
+    cmd+=['-i',str(clip.path),'-map','0:v:0','-an','-sn','-dn']
+    if cuda:
+        # No host download: keep decoded frames on GPU through scale and encode.
+        vf=f'scale_cuda={w}:{h}:format=nv12:interp_algo=lanczos,setsar=1'
+    else:
+        speed=float(clip.speed) if clip.kind=='video' else 1.
+        vf=(f'setpts=(PTS-STARTPTS)/{speed:.9g},fps={fps},'
+            f'scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,'
+            f'pad={w}:{h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,'
+            f'tpad=stop_mode=clone:stop_duration={duration:.8f},format=yuv420p')
+    cmd+=['-vf',vf,'-frames:v',str(frames),'-r',str(fps),'-fps_mode','cfr',
+          *_editor_encode_args(crf,hardware,master)]
+    if not cuda:cmd+=['-pix_fmt','yuv420p']
+    cmd+=['-video_track_timescale','90000',str(output)]
+    return cmd
+
+
+def _editor_fast_render(project,output,report,cancel,master=False):
+    """GPU-accelerated editor timeline; captions stay with the established renderer."""
+    if any(str(getattr(c,'caption','')).strip() for c in project.clips):
+        report('Captions detected — using original editor renderer',0,100)
+        return engine.render(project,str(output),report,cancel)
+    w,h,fps=int(project.width),int(project.height),int(project.fps)
+    if min(w,h,fps)<=0 or w%2 or h%2:raise ValueError('Invalid editor output dimensions or FPS')
+    ff,hw,note=quality_engine._select_nvenc_ffmpeg(
+        engine.get_ffmpeg(),'Auto / NVIDIA NVENC',
+        status=lambda message:report(message,0,100),cancel=cancel)
+    total=max(.001,float(project.duration))
+    with tempfile.TemporaryDirectory(prefix='cazy_editor_gpu_') as scratch:
+        folder=Path(scratch)
+        inputs=[]
+        elapsed=0.
+        # Do not mix CPU and GPU codec configurations in a concat stream.
+        # If a hardware encode fails, restart all segments on CPU.
+        for hardware in ((True,False) if hw else (False,)):
+            inputs=[];elapsed=0.
+            try:
+                for i,clip in enumerate(project.clips):
+                    if cancel.is_set():raise RuntimeError('Cancelled by user.')
+                    duration=float(clip.duration)
+                    frames=round((elapsed+duration)*fps)-round(elapsed*fps)
+                    if frames<=0:
+                        elapsed+=duration;continue
+                    info=engine.probe(clip.path)
+                    part=folder/f'clip{i:05d}.mp4'
+                    compatible=hardware and _editor_cuda_eligible(clip,info,w,h,fps)
+                    modes=(True,False) if compatible else (False,)
+                    for use_cuda in modes:
+                        label=('CUDA decode/scale + NVENC' if use_cuda else
+                            'NVENC + CPU filters' if hardware else 'CPU fallback')
+                        report(f'{label} • clip {i+1}/{len(project.clips)}',80*elapsed/total,100)
+                        try:
+                            cmd=_editor_clip_command(ff,clip,info,w,h,fps,frames,part,
+                                int(project.crf),hardware,use_cuda,master)
+                            quality_engine._run(cmd,None,cancel,ffmpeg_duration=frames/fps,
+                                ffmpeg_fps=fps,on_progress=lambda f,d,t,e=elapsed,n=duration,l=label:
+                                    report(l,80*min(total,e+n*f)/total,100))
+                            break
+                        except RuntimeError:
+                            if cancel.is_set() or not use_cuda:raise
+                            report('CUDA path unavailable; keeping NVENC with CPU filters',80*elapsed/total,100)
+                    if not part.is_file() or part.stat().st_size<512:
+                        raise RuntimeError('Editor segment was not produced')
+                    inputs.append(part);elapsed+=duration
+                break
+            except RuntimeError:
+                if cancel.is_set() or not hardware:raise
+                report('Hardware encoder failed; restarting timeline with CPU encoder',0,100)
+        if not inputs:raise RuntimeError('Timeline contains no exportable frames')
+        # Each segment shares dimensions, frame rate and codec options. All list
+        # paths are generated internally and never contain user-supplied text.
+        listing=folder/'concat.txt'
+        listing.write_text(''.join("file '"+part.name+"'\n" for part in inputs),encoding='utf-8')
+        report('Mixing gameplay + soundtrack',82,100)
+        audio=_build_preview_audio(project,folder,cancel,ffmpeg=ff)
+        report('Joining video and audio without re-encoding video',92,100)
+        quality_engine._run([str(ff),'-hide_banner','-loglevel','error','-nostdin','-y',
+            '-f','concat','-safe','1','-i',str(listing),'-i',str(audio),
+            '-map','0:v:0','-map','1:a:0','-c:v','copy','-c:a','aac',
+            '-b:a','320k','-movflags','+faststart','-t',f'{total:.8f}',str(output)],
+            None,cancel,ffmpeg_duration=total,
+            on_progress=lambda f,d,t:report('Muxing final MP4',92+7*f,100))
+    if not Path(output).is_file() or Path(output).stat().st_size<512:
+        raise RuntimeError('Editor output is missing')
+    report('Complete',100,100)
+    return str(output)
+
+
+def _editor_ai_base_fps(project,probe):
+    """Retain genuine source frames; interpolate only when target exceeds them."""
+    target=int(project.fps)
+    rates=[float(probe(c.path).fps)*float(c.speed) for c in project.clips
+           if c.kind=='video']
+    # Keep every source temporal sample up to the output rate. For mixed clips,
+    # avoid reducing native high-FPS footage just to force interpolation.
+    return min(target,max(1,round(max(rates,default=target))))
+
+
+def _render_editor_pipeline(project,output,mode,sampling,report,cancel):
+    if mode not in _EDITOR_RENDER_MODES:raise ValueError('Unknown editor processing pipeline')
+    if mode=='Standard editor':
+        return engine.render(project,output,report,cancel)
+    if mode=='NVIDIA Fast':
+        return _editor_fast_render(project,output,report,cancel)
+    # Neural models are not bundled: fail explicitly rather than fake AI.
+    addons=quality_engine.local_addons(Path(__file__).resolve().parent)
+    if not addons.get('Real-ESRGAN'):
+        raise RuntimeError('Install Real-ESRGAN using Quality Lab > AI Addons Setup.')
+    target_fps=int(project.fps)
+    render_project=copy.deepcopy(project)
+    rife=(mode=='RIFE AI + Anime')
+    if rife:
+        render_project.fps=_editor_ai_base_fps(project,engine.probe)
+        if render_project.fps<target_fps and not addons.get('RIFE'):
+            raise RuntimeError('Install RIFE using Quality Lab > AI Addons Setup.')
+    if cancel.is_set():raise RuntimeError('Cancelled by user.')
+    # The existing renderer handles captions; use a high-quality master for
+    # either base path. Source clips, settings, and current project are untouched.
+    render_project.crf=12
+    with tempfile.TemporaryDirectory(prefix='cazy_editor_neural_') as folder:
+        master=Path(folder)/'timeline_master.mp4'
+        _editor_fast_render(render_project,master,
+            lambda msg,cur,total:report('Timeline master • '+msg,35*cur/max(1,total),100),
+            cancel,master=True)
+        upscaler='Real-ESRGAN General' if mode=='AI General (Real-ESRGAN)' else 'Real-ESRGAN Anime'
+        method='RIFE AI' if rife and render_project.fps<target_fps else 'Native / Duplicate'
+        if method=='RIFE AI' and target_fps not in quality_engine.TARGET_FPS:
+            raise ValueError('RIFE export requires 30, 60, 120 or 240 FPS')
+        if rife and method!='RIFE AI':
+            report('Source already reaches target FPS — no unnecessary RIFE interpolation',35,100)
+        opts=quality_engine.QualitySettings(resolution='Source',
+            fps=target_fps if method=='RIFE AI' else 0,
+            frame_method=method,upscale=upscaler,ai_speed=sampling,
+            encoder='Auto / NVIDIA NVENC',quality='Maximum',fit='Fit / black bars',
+            sharpen=0,saturation=100,contrast=100)
+        return quality_engine.render_quality(str(master),str(output),opts,
+            status=lambda msg:report(msg,35,100),cancel=cancel,
+            progress=lambda pct,stage,done,total:report(stage,35+.65*pct,100))
+
 
 # ---- Editor audio monitor (Windows native WAV playback, FFmpeg audio-only mix) ----
 _PREVIEW_AUDIO_RATE=44100
