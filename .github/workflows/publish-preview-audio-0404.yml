@@ -18,7 +18,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y python3-tk xvfb ffmpeg
-      - name: Validate editor, random song selection and Music Hunter
+      - name: Validate audio mixing, editor and Music Hunter
         run: |
           set -euo pipefail
           python -m compileall -q source tests
