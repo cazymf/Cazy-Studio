@@ -132,7 +132,8 @@ class QualityLab(tk.Toplevel):
         self.option(controls,'Video encoder','encoder',['Auto / NVIDIA NVENC','CPU x264','HEVC / NVIDIA NVENC','AV1 / NVIDIA NVENC'],5,1)
         self.option(controls,'Encoding quality','quality',quality.QUALITY_LEVELS,6,0)
         self.option(controls,'AI speed / real frames','ai_speed',['Fast (30 FPS)','Balanced (60 FPS)','Every output frame'],7,0)
-        self.option(controls,'Temporal effect','motion_blur_mode',['Temporal mix','Adaptive temporal smoothing'],7,1)
+        self.option(controls,'Temporal effect','motion_blur_mode',['Temporal mix','Adaptive temporal smoothing','Cazy Fluid Motion','Cazy Fluid Motion / Optical Flow'],7,1)
+        self.option(controls,'Fluid Motion shutter angle','fluid_shutter',['90','180','270','360'],9,0)
         disk=tk.Frame(controls,bg=CARD);disk.grid(row=8,column=0,columnspan=2,sticky='ew',padx=8,pady=(10,1))
         self.label(disk,'AI scratch workspace (cropped frames; automatically cleaned)',MUTED,9).pack(anchor='w')
         line2=tk.Frame(disk,bg=CARD);line2.pack(fill='x')
@@ -248,7 +249,8 @@ class QualityLab(tk.Toplevel):
                 f'Frame generation: {opts.frame_method}',
                 f'Upscaler: {opts.upscale}',
                 f'Temporal AI: {opts.restoration_model}',
-                f'Temporal effect: {opts.motion_blur_mode} ({opts.motion_blur}/3)',
+                f'Temporal effect: {opts.motion_blur_mode}',
+                f'Virtual shutter: {opts.fluid_shutter} degrees (Fluid Motion only)',
                 f'Encoder requested: {opts.encoder}',
                 f'Render start: {opts.start:.2f}s',
                 f'Render duration: {opts.duration:.2f}s' if opts.duration else 'Render duration: remaining source',
@@ -472,7 +474,7 @@ class QualityLab(tk.Toplevel):
             raw=str(var.get()).strip()
             if k in ('start','duration'): value=float(raw)
             elif k=='fps': value=0 if raw=='Source FPS' else int(raw)
-            elif k in ('denoise','sharpen','motion_blur','contrast','saturation'):value=int(raw)
+            elif k in ('denoise','sharpen','motion_blur','contrast','saturation','fluid_shutter'):value=int(raw)
             else:value=raw
             setattr(opts,k,value)
         clip=self._active_timeline_trim()
@@ -491,6 +493,8 @@ class QualityLab(tk.Toplevel):
                 scope=f'\nRender range: {opts.start:.2f}s → '+(f'{opts.start+opts.duration:.2f}s' if opts.duration else 'end of source')
                 desc=f'Output: {w} × {h}  |  {fps} FPS\n{opts.upscale}  •  {opts.frame_method}\nAI real frames: {rate:g} FPS  •  {opts.encoder}'+scope
             else:desc='Video quality profiles\nBuilt-in FFmpeg or optional AI models'
+            if opts.motion_blur_mode.startswith('Cazy Fluid Motion'):
+                desc += f'\nVirtual shutter: {opts.fluid_shutter}° | blends before FPS reduction. Strength slider ignored.'
             self.recipe.configure(text=desc)
             addons=quality.local_addons(Path(__file__).resolve().parent)
             self.addons_label.configure(text='RIFE: '+('Installed' if addons['RIFE'] else 'Not installed')+'  •  Real-ESRGAN: '+('Installed' if addons['Real-ESRGAN'] else 'Not installed'))
