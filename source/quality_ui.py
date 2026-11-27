@@ -161,6 +161,9 @@ class QualityLab(tk.Toplevel):
         self.label(side,'Slide to compare original vs enhanced. Still previews exclude temporal and AI models.',MUTED,9).pack(anchor='w',pady=(1,12))
         self.button(side,'COMPARE CURRENT FRAME',self.compare).pack(fill='x',pady=4)
         self.button(side,'VIDEO QUALITY INSPECTOR',self.inspect_quality).pack(fill='x',pady=4)
+        self.button(side,'TEMPORAL AI RESTORATION',self.configure_restoration).pack(fill='x',pady=4)
+        for key, default in [('restoration_model','Off'),('restoration_repo',''),('restoration_weights',''),('restoration_python','')]:
+            self.vars[key]=tk.StringVar(value=default)
         self.button(side,'RENDER 3-SECOND TEST',lambda:self.export(sample=True)).pack(fill='x',pady=4)
         self.button(side,'EXPORT ENHANCED MP4',lambda:self.export(sample=False),True).pack(fill='x',pady=(6,5))
         self.button(side,'Open Last Export',self.open_last).pack(fill='x',pady=4)
@@ -193,6 +196,42 @@ class QualityLab(tk.Toplevel):
         self.progress_bar=ttk.Progressbar(foot,orient='horizontal',mode='determinate',maximum=100)
         self.progress_bar.pack(fill='x',pady=(2,3))
 
+    def configure_restoration(self):
+        win=tk.Toplevel(self)
+        win.title('Temporal AI restoration')
+        win.configure(bg=BG)
+        win.transient(self)
+        fields=[('restoration_model','Model'),('restoration_repo','Model repository'),
+                ('restoration_weights','Checkpoint'),('restoration_python','Python executable (optional)')]
+        draft={key:tk.StringVar(value=self.vars[key].get()) for key,_ in fields}
+        for i,(key,label) in enumerate(fields):
+            self.label(win,label).grid(row=i,column=0,sticky='w',padx=10,pady=8)
+            if key=='restoration_model':
+                ttk.Combobox(win,textvariable=draft[key],values=['Off','RealBasicVSR','EGVSR'],state='readonly').grid(row=i,column=1,sticky='ew')
+            else:
+                ttk.Entry(win,textvariable=draft[key],width=55).grid(row=i,column=1,sticky='ew')
+                def browse(k=key):
+                    value=(filedialog.askdirectory(parent=win) if k=='restoration_repo'
+                           else filedialog.askopenfilename(parent=win))
+                    if value: draft[k].set(value)
+                self.button(win,'Browse',browse).grid(row=i,column=2,padx=8)
+        def save():
+            model=draft['restoration_model'].get()
+            if model!='Off':
+                result=quality.creative_vsr_preflight(model,draft['restoration_repo'].get(),
+                      draft['restoration_weights'].get(),draft['restoration_python'].get())
+                if not result['ready']:
+                    messagebox.showerror('Model setup',result['message'],parent=win)
+                    return
+            for key,_ in fields:
+                self.vars[key].set(draft[key].get())
+            self._schedule_autosave()
+            self._show_recipe()
+            win.destroy()
+        self.label(win,'Requires external model code, weights and dependencies. EGVSR requires its video adapter.',MUTED,9).grid(row=4,column=0,columnspan=3,padx=10,pady=8)
+        self.button(win,'Apply restoration settings',save,True).grid(row=5,column=0,columnspan=3,pady=10)
+        win.grid_columnconfigure(1,weight=1)
+
     def inspect_quality(self):
         if not self.info:
             return
@@ -208,6 +247,7 @@ class QualityLab(tk.Toplevel):
                 f'Output: {w} x {h} @ {fps:g} FPS',
                 f'Frame generation: {opts.frame_method}',
                 f'Upscaler: {opts.upscale}',
+                f'Temporal AI: {opts.restoration_model}',
                 f'Temporal effect: {opts.motion_blur_mode} ({opts.motion_blur}/3)',
                 f'Encoder requested: {opts.encoder}',
                 f'Render start: {opts.start:.2f}s',
