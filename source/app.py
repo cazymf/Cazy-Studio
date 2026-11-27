@@ -3,6 +3,9 @@ Open source Python/Tk UI; FFmpeg rendering lives in engine.py.
 """
 from __future__ import annotations
 import copy
+import ctypes
+import shutil
+import wave
 import json
 import hashlib
 import random
@@ -66,6 +69,13 @@ class Studio(tk.Tk):
         self.preview_count = 0
         self.preview_stats_from = time.monotonic()
         self.preview_decoder = PreviewDecoder()
+        self._audio_device = _PreviewWavePlayer()
+        self._audio_results = queue.Queue()
+        self._audio_cancel = None
+        self._audio_folder = None
+        self._audio_file = None
+        self._audio_pending = False
+        self._audio_enabled = tk.BooleanVar(value=True)
         self.preview_generation = 0
         self.preview_caption = ''
         self._pending_resize = None
@@ -94,6 +104,7 @@ class Studio(tk.Tk):
         self._draw_timeline()
         self.after(32, self._tick)
         self.after(25, self._poll_preview)
+        self.after(75, self._poll_preview_audio)
         self.after(120, self._poll_jobs)
         self.protocol('WM_DELETE_WINDOW', self.on_close)
 
@@ -237,6 +248,7 @@ class Studio(tk.Tk):
         self.play_btn=self._button(controls,'▶  Play',self.toggle_play,width=9,small=True)
         self.play_btn.pack(side='left',padx=8)
         self._button(controls,'Frame  ▶',lambda:self.seek(self.playhead + 1/self.project.fps),small=True).pack(side='left')
+        self._button(controls,'Audio On/Off',self.toggle_preview_audio,small=True).pack(side='left',padx=(8,0))
         self.clock_label=self._label(controls,'00:00.00 / 00:00.00',10,ACCENT2,True)
         self.clock_label.pack(side='right')
 
@@ -300,6 +312,7 @@ class Studio(tk.Tk):
         return self.active_section == 'editor' and not isinstance(self.focus_get(),(tk.Entry,tk.Text,tk.Spinbox,ttk.Entry,ttk.Combobox))
 
     def _snapshot(self):
+        self._invalidate_preview_audio()
         self.undo_stack.append(copy.deepcopy(self.project))
         if len(self.undo_stack)>55: self.undo_stack.pop(0)
         self.redo_stack.clear()
@@ -319,6 +332,7 @@ class Studio(tk.Tk):
         self.status_var.set('Redid edit.')
 
     def _refresh_all(self):
+        self._invalidate_preview_audio()
         self.selected=min(self.selected,len(self.project.clips)-1)
         self.playhead=min(self.playhead,self.project.duration)
         self.dim_label.configure(text=f'PROJECT {self.project.width} × {self.project.height}  •  {self.project.fps} FPS')
@@ -741,7 +755,7 @@ class Studio(tk.Tk):
 
     def open_autodirector(self):
         if self.active_section == 'autodirector':return
-        self.playing=False
+        self._stop_preview_audio()
         self.play_btn.configure(text='▶  Play')
         self.editor_workspace.pack_forget()
         self.autodirector_workspace.pack(side='top',fill='both',expand=True,before=self.footer)
@@ -866,27 +880,129 @@ class Studio(tk.Tk):
         if hasattr(self,'clock_label'):
             self.clock_label.configure(text=f'{engine.fmt_time(self.playhead)} / {engine.fmt_time(self.project.duration)}')
 
+    def _stop_preview_audio(self):
+        self._audio_pending=False
+        self.playing=False
+        self._audio_device.close()
+        self.play_btn.configure(text='▶  Play')
+
+    def _invalidate_preview_audio(self):
+        self._stop_preview_audio()
+        if self._audio_cancel is not None:
+            self._audio_cancel.set()
+        self._audio_cancel=None
+        if self._audio_folder:
+            shutil.rmtree(self._audio_folder,ignore_errors=True)
+        self._audio_folder=None
+        self._audio_file=None
+
+    def toggle_preview_audio(self):
+        enabled=not self._audio_enabled.get()
+        resume=self.playing or self._audio_pending
+        self._stop_preview_audio()
+        self._audio_enabled.set(enabled)
+        self.status_var.set('Preview audio enabled.' if enabled else 'Preview audio muted (export unchanged).')
+        if resume:self.toggle_play()
+
+    def _begin_preview_clock(self):
+        self.playing=True
+        self._audio_pending=False
+        self.play_last=time.monotonic()
+        self.play_btn.configure(text='❚❚  Pause')
+
+    def _play_prepared_audio(self):
+        try:
+            self._audio_device.play(self._audio_file,self.playhead)
+            self.status_var.set('Playing preview with gameplay + background audio.')
+        except Exception as exc:
+            self._audio_device.close()
+            self.status_var.set('Preview audio unavailable: '+str(exc)[:180])
+        self._begin_preview_clock()
+
+    def _prepare_preview_audio(self):
+        self._audio_pending=True
+        self.play_btn.configure(text='Cancel audio')
+        self.status_var.set('Preparing preview audio (gameplay + music)…')
+        # One immutable project snapshot per mix. Tk stays on the main thread.
+        if self._audio_cancel is not None:
+            return
+        cancel=threading.Event()
+        self._audio_cancel=cancel
+        project=copy.deepcopy(self.project)
+        results=self._audio_results
+        def run():
+            folder=None
+            try:
+                folder=tempfile.mkdtemp(prefix='cazy_preview_audio_')
+                path=_build_preview_audio(project,folder,cancel)
+                if cancel.is_set():
+                    shutil.rmtree(folder,ignore_errors=True)
+                    return
+                results.put((cancel,folder,path,None))
+            except Exception as exc:
+                if folder:shutil.rmtree(folder,ignore_errors=True)
+                if not cancel.is_set():results.put((cancel,None,None,str(exc)))
+        threading.Thread(target=run,daemon=True).start()
+
+    def _poll_preview_audio(self):
+        try:
+            while True:
+                token,folder,path,error=self._audio_results.get_nowait()
+                if token is not self._audio_cancel or token.is_set():
+                    if folder:shutil.rmtree(folder,ignore_errors=True)
+                    continue
+                self._audio_cancel=None
+                if error:
+                    if self._audio_pending:
+                        self.status_var.set('Preview audio unavailable: '+error[:180])
+                        self._begin_preview_clock()
+                    continue
+                self._audio_folder=folder
+                self._audio_file=path
+                if self._audio_pending and self._audio_enabled.get():
+                    self._play_prepared_audio()
+        except queue.Empty:
+            pass
+        self.after(75,self._poll_preview_audio)
+
     def seek(self,t):
+        was_playing=self.playing
         self.playhead=max(0,min(t,self.project.duration))
+        if was_playing:
+            self.play_last=time.monotonic()
+            if self._audio_device.is_open:
+                if self.playhead>=self.project.duration:
+                    self._stop_preview_audio()
+                else:
+                    self._play_prepared_audio()
         self.show_frame();self._update_timeline_playhead();self._update_clock()
 
     def toggle_play(self):
-        if not self.project.clips:return
-        self.playing=not self.playing
-        if self.playing and self.playhead>=self.project.duration: self.playhead=0
-        self.play_last=time.monotonic()
-        self.play_btn.configure(text='❚❚  Pause' if self.playing else '▶  Play')
+        if not self.project.clips or self.exporting:return
+        if self.playing or self._audio_pending:
+            self._stop_preview_audio()
+            return
+        if self.playhead>=self.project.duration:self.playhead=0
+        if not self._audio_enabled.get() or os.name!='nt':
+            self._begin_preview_clock()
+        elif self._audio_file:
+            self._play_prepared_audio()
+        else:
+            self._prepare_preview_audio()
 
     def _tick(self):
         try:
             if self.playing:
                 now=time.monotonic()
-                self.playhead+=now-self.play_last
+                audio_position=self._audio_device.position()
+                if audio_position is None:
+                    self.playhead+=now-self.play_last
+                else:
+                    self.playhead=audio_position
                 self.play_last=now
-                if self.playhead>=self.project.duration:
+                if self.playhead>=self.project.duration-.025:
                     self.playhead=self.project.duration
-                    self.playing=False
-                    self.play_btn.configure(text='▶  Play')
+                    self._stop_preview_audio()
                 if now-self.frame_last >= 1.0/max(1,self.preview_target):
                     self.frame_last=now
                     self.show_frame();self._update_timeline_playhead();self._update_clock()
@@ -991,7 +1107,7 @@ class Studio(tk.Tk):
         if self.exporting:return
         self.exporting=True
         self.export_cancel.clear()
-        self.playing=False
+        self._stop_preview_audio()
         self.play_btn.configure(text='▶  Play')
         self.export_window=tk.Toplevel(self)
         self.export_window.title('Rendering Cazy Studio Project  •  0%')
@@ -1063,8 +1179,164 @@ class Studio(tk.Tk):
         if self._pending_resize is not None:
             self.after_cancel(self._pending_resize)
         self.autodirector_view.save()
+        self._invalidate_preview_audio()
         self.preview_decoder.close()
         self.destroy()
+
+# ---- Editor audio monitor (Windows native WAV playback, FFmpeg audio-only mix) ----
+_PREVIEW_AUDIO_RATE=44100
+_PREVIEW_AUDIO_FRAME_BYTES=4
+
+def _preview_atempo(speed):
+    speed=float(speed)
+    if not .1<=speed<=4.0:raise ValueError('Unsupported clip speed')
+    filters=[]
+    while speed<.5:
+        filters.append('atempo=0.5');speed*=2
+    while speed>2:
+        filters.append('atempo=2');speed/=2
+    filters.append(f'atempo={speed:.9g}')
+    return ','.join(filters)
+
+
+def _preview_ffmpeg(command,cancel):
+    if cancel.is_set():raise RuntimeError('Preview cancelled')
+    with tempfile.TemporaryFile() as err:
+        proc=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+            stderr=err,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        try:
+            while proc.poll() is None:
+                if cancel.wait(.05):
+                    proc.kill()
+                    raise RuntimeError('Preview cancelled')
+            if proc.returncode:
+                err.seek(0,2);err.seek(max(0,err.tell()-1200))
+                raise RuntimeError(err.read().decode('utf-8','replace').strip() or 'FFmpeg audio mix failed')
+        finally:
+            if proc.poll() is None:proc.kill()
+            proc.wait()
+
+
+def _preview_zero_frames(out,frames,cancel):
+    block=b'\0'*(4096*_PREVIEW_AUDIO_FRAME_BYTES)
+    while frames:
+        if cancel.is_set():raise RuntimeError('Preview cancelled')
+        n=min(frames,4096)
+        out.writeframesraw(block[:n*_PREVIEW_AUDIO_FRAME_BYTES])
+        frames-=n
+
+
+def _build_preview_audio(project,folder,cancel,ffmpeg=None,probe=None):
+    """Render only PCM audio; never render or modify source video files."""
+    ff=str(ffmpeg or quality_engine._creative_ffmpeg())
+    probe=probe or engine.probe
+    folder=Path(folder)
+    base=folder/'gameplay.wav'
+    raw=folder/'clip.pcm'
+    rate=_PREVIEW_AUDIO_RATE
+    cursor=0.0
+    with wave.open(str(base),'wb') as out:
+        out.setnchannels(2);out.setsampwidth(2);out.setframerate(rate)
+        for clip in project.clips:
+            if cancel.is_set():raise RuntimeError('Preview cancelled')
+            duration=max(0.0,float(clip.duration))
+            frames=round((cursor+duration)*rate)-round(cursor*rate)
+            cursor+=duration
+            if frames<=0:continue
+            vol=max(0.0,float(clip.volume))
+            if clip.kind!='video' or not vol or not probe(clip.path).has_audio:
+                _preview_zero_frames(out,frames,cancel)
+                continue
+            filters=_preview_atempo(clip.speed)+f',volume={vol:.9g},apad'
+            _preview_ffmpeg([ff,'-hide_banner','-loglevel','error','-nostdin','-y',
+                '-ss',f'{float(clip.start):.9f}','-i',str(clip.path),
+                '-map','0:a:0','-vn','-sn','-dn','-af',filters,
+                '-t',f'{frames/rate:.9f}','-ac','2','-ar',str(rate),
+                '-c:a','pcm_s16le','-f','s16le',str(raw)],cancel)
+            remaining=frames
+            with raw.open('rb') as inp:
+                while remaining:
+                    if cancel.is_set():raise RuntimeError('Preview cancelled')
+                    data=inp.read(min(remaining,16384)*_PREVIEW_AUDIO_FRAME_BYTES)
+                    if not data:break
+                    data=data[:len(data)//_PREVIEW_AUDIO_FRAME_BYTES*_PREVIEW_AUDIO_FRAME_BYTES]
+                    if not data:break
+                    out.writeframesraw(data)
+                    remaining-=len(data)//_PREVIEW_AUDIO_FRAME_BYTES
+            if remaining:_preview_zero_frames(out,remaining,cancel)
+            raw.unlink(missing_ok=True)
+    offset=max(0.0,float(project.music_offset))
+    volume=max(0.0,float(project.music_volume))
+    if not project.music_path or not volume or offset>=cursor:
+        return str(base)
+    if not Path(project.music_path).is_file():raise FileNotFoundError('Background music file is missing')
+    mixed=folder/'preview.wav'
+    delay=round(offset*1000)
+    graph=(f'[1:a:0]aresample={rate},aformat=channel_layouts=stereo,'
+           f'volume={volume:.9g},adelay={delay}:all=1[m];'
+           '[0:a:0][m]amix=inputs=2:duration=first:normalize=0[out]')
+    _preview_ffmpeg([ff,'-hide_banner','-loglevel','error','-nostdin','-y',
+        '-i',str(base),'-stream_loop','-1','-i',str(project.music_path),
+        '-filter_complex',graph,'-map','[out]','-t',f'{cursor:.9f}',
+        '-ac','2','-ar',str(rate),'-c:a','pcm_s16le',str(mixed)],cancel)
+    base.unlink(missing_ok=True)
+    return str(mixed)
+
+
+class _PreviewWavePlayer:
+    """Native Windows MCI waveaudio; no pip packages, no external player window."""
+    def __init__(self):
+        self.alias='cazy_preview_'+str(id(self))
+        self.is_open=False
+        self.length=0
+        self.api=None
+
+    def _send(self,command):
+        if self.api is None:
+            self.api=ctypes.WinDLL('winmm')
+            self.api.mciSendStringW.argtypes=[ctypes.c_wchar_p,ctypes.c_wchar_p,ctypes.c_uint,ctypes.c_void_p]
+            self.api.mciSendStringW.restype=ctypes.c_uint
+            self.api.mciGetErrorStringW.argtypes=[ctypes.c_uint,ctypes.c_wchar_p,ctypes.c_uint]
+        result=ctypes.create_unicode_buffer(512)
+        code=self.api.mciSendStringW(command,result,len(result),None)
+        if code:
+            self.api.mciGetErrorStringW(code,result,len(result))
+            raise RuntimeError(result.value or f'Windows audio error {code}')
+        return result.value
+
+    def play(self,path,seconds):
+        self.close()
+        self._send(f'open "{path}" type waveaudio alias {self.alias}')
+        self.is_open=True
+        try:
+            self._send(f'set {self.alias} time format milliseconds')
+            self.length=int(self._send(f'status {self.alias} length'))
+            pos=max(0,min(round(seconds*1000),max(0,self.length-1)))
+            self._send(f'play {self.alias} from {pos}')
+        except Exception:
+            self.close()
+            raise
+
+    def position(self):
+        if not self.is_open:return None
+        try:
+            pos=int(self._send(f'status {self.alias} position'))
+            if pos>=self.length-25:
+                return self.length/1000
+            if self._send(f'status {self.alias} mode').lower()!='playing':
+                self.close()
+                return None
+            return pos/1000
+        except Exception:
+            self.close()
+            return None
+
+    def close(self):
+        if self.is_open:
+            try:self._send(f'close {self.alias}')
+            except Exception:pass
+        self.is_open=False
+
 
 # ---- Cazy AutoDirector explicit video library (v0.3.7) ----
 # This lives in app.py to keep the existing v0.3.5 Update Center's safe-file
