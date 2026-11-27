@@ -46,6 +46,7 @@ class QualitySettings:
     sharpen: int = 20  # 0..100
     motion_blur: int = 0  # 0..3
     motion_blur_mode: str = 'Temporal mix'
+    fluid_shutter: int = 180
     restoration_model: str = 'Off'
     restoration_repo: str = ''
     restoration_weights: str = ''
@@ -73,8 +74,10 @@ class QualitySettings:
         if not 0 <= self.sharpen <= 100: raise ValueError('Sharpen out of range')
         if self.restoration_model not in ('Off', 'RealBasicVSR', 'EGVSR'):
             raise ValueError('Unknown restoration model')
-        if self.motion_blur_mode not in ('Temporal mix', 'Adaptive temporal smoothing'):
+        if self.motion_blur_mode not in ('Temporal mix', 'Adaptive temporal smoothing', 'Cazy Fluid Motion', 'Cazy Fluid Motion / Optical Flow'):
             raise ValueError('Unknown motion blur mode')
+        if self.fluid_shutter not in (90,180,270,360):
+            raise ValueError('Invalid virtual shutter angle')
         if not 0 <= self.motion_blur <= 3: raise ValueError('Motion blur out of range')
         if not 80 <= self.contrast <= 130: raise ValueError('Contrast out of range')
         if not 80 <= self.saturation <= 150: raise ValueError('Saturation out of range')
@@ -206,6 +209,36 @@ def _encode_options(opts: QualitySettings, software: bool=False) -> list[str]:
             str({'Maximum':16,'High':18,'Balanced':22}[opts.quality]), '-b:v','0']
 
 
+def fluid_motion_filters(source_fps, target_fps, shutter, vectors=False):
+    """Approximate a virtual exposure using native samples before decimation.
+    Optional motion-compensated interpolation increases temporal sampling density.
+    FFmpeg scene detection protects interpolation, not the subsequent exposure mix.
+    """
+    source_fps=float(source_fps)
+    target_fps=float(target_fps)
+    if not math.isfinite(source_fps) or not math.isfinite(target_fps) or target_fps<=0 or source_fps<target_fps-.1:
+        raise ValueError('Fluid Motion requires source FPS at least equal to output FPS.')
+    if shutter not in (90,180,270,360):
+        raise ValueError('Invalid virtual shutter angle')
+    filters=[]
+    if vectors:
+        rate=max(240, int(math.ceil(source_fps*2)))
+        if rate>480:
+            raise ValueError('Optical Flow Fluid Motion supports sources up to 240 FPS.')
+        filters.append(f'minterpolate=fps={rate}:mi_mode=mci:mc_mode=aobmc:me_mode=bilat:me=epzs:scd=fdiff:scd_threshold=10')
+        source_fps=rate
+    exposure=source_fps/target_fps*shutter/360.
+    # Integrate fractional exposure using an edge sample with fractional weight.
+    count=max(1,int(math.ceil(exposure-1e-8)))
+    if count>16:
+        raise ValueError('Fluid Motion exposure exceeds 16 samples.')
+    if count>1:
+        weights=[max(0.,exposure-(count-1))]+[1.]*(count-1)
+        filters.append("tmix=frames=%d:weights='%s'"%(count,' '.join(f'{v:.6g}' for v in weights)))
+    filters.append(f'fps={target_fps:g}')
+    return filters
+
+
 def _filter_chain(info: engine.MediaInfo, opts: QualitySettings, *,
                   only_image=False, after_ai=False) -> list[str]:
     w,h,fps = output_specs(info, opts)
@@ -216,11 +249,14 @@ def _filter_chain(info: engine.MediaInfo, opts: QualitySettings, *,
     if opts.contrast!=100 or opts.saturation!=100:
         fs.append(f'eq=contrast={opts.contrast/100:.3f}:saturation={opts.saturation/100:.3f}')
     if not only_image:
-        if not after_ai and opts.frame_method=='Optical Flow' and info.fps > 0 and fps > info.fps + .4:
+        fluid=opts.motion_blur_mode.startswith('Cazy Fluid Motion')
+        if fluid:
+            fs.extend(fluid_motion_filters(info.fps,fps,opts.fluid_shutter,opts.motion_blur_mode.endswith('Optical Flow')))
+        elif not after_ai and opts.frame_method=='Optical Flow' and info.fps > 0 and fps > info.fps + .4:
             fs.append(f'minterpolate=fps={fps}:mi_mode=mci:mc_mode=aobmc:me_mode=bilat:me=epzs')
         else:
             fs.append(f'fps={fps}')
-        if opts.motion_blur:
+        if opts.motion_blur and not fluid:
             n=opts.motion_blur+1
             if opts.motion_blur_mode == 'Adaptive temporal smoothing':
                 # Motion-sensitive temporal denoising, not vector-based RSMB.
@@ -763,6 +799,11 @@ def render_quality(path: str, output: str, opts: QualitySettings, status: Callab
     info=engine.probe(path)
     if info.kind!='video':raise ValueError('Quality Lab accepts video footage only')
     w,h,fps=output_specs(info,opts)
+    if opts.motion_blur_mode.startswith('Cazy Fluid Motion'):
+        if opts.upscale!='Lanczos' or opts.frame_method!='Native / Duplicate':
+            raise ValueError('Fluid Motion requires Lanczos and Native / Duplicate to preserve native samples; use its own Optical Flow mode if desired.')
+        fluid_motion_filters(info.fps,fps,opts.fluid_shutter,opts.motion_blur_mode.endswith('Optical Flow'))
+        if status:status('Cazy Fluid Motion: virtual exposure before FPS reduction')
     dur=_start_duration(info,opts,sample)
     output=os.path.abspath(output)
     Path(output).parent.mkdir(parents=True,exist_ok=True)
