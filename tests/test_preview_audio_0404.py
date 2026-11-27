@@ -50,7 +50,7 @@ class AudioPreviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             p=types.SimpleNamespace(clips=[types.SimpleNamespace(duration=1)])
             with self.assertRaisesRegex(RuntimeError,'cancelled'):
-                ns['_build_preview_audio'](p,temp,cancel,'ffmpeg')
+                ns['_build_preview_audio'](p,temp,cancel,'ffmpeg',lambda _:None)
     def test_playback_integration(self):
         studio=next(n for n in TREE.body if isinstance(n,ast.ClassDef) and n.name=='Studio')
         methods={n.name:ast.unparse(n) for n in studio.body if isinstance(n,ast.FunctionDef)}
