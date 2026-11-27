@@ -50,7 +50,7 @@ YELLOW = '#eac16f'
 class Studio(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title(f'Cazy Studio v{APP_VERSION}  |  Live Export Progress')
+        self.title(f'Cazy Studio v{APP_VERSION}  |  Editor GPU & AI')
         self.geometry('1530x930')
         self.minsize(1070, 710)
         self.configure(bg=BG)
@@ -132,7 +132,7 @@ class Studio(tk.Tk):
         filemenu.add_command(label='Save Project As...', command=lambda: self.save_project(True))
         filemenu.add_separator()
         filemenu.add_command(label='Import Media                    Ctrl+I', command=self.import_media)
-        filemenu.add_command(label='Export Video                   Ctrl+E', command=self.export_dialog)
+        filemenu.add_command(label='GPU / AI Export                Ctrl+E', command=self.export_dialog)
         filemenu.add_command(label='Quality Lab                     Ctrl+L', command=self.open_quality_lab)
         filemenu.add_command(label='AutoDirector Workspace       Ctrl+B', command=self.open_autodirector)
         filemenu.add_command(label='Check for Updates', command=self.open_update_center)
@@ -171,7 +171,7 @@ class Studio(tk.Tk):
         tk.Label(toolbar,text=f'v{APP_VERSION}',bg=BG,fg=MUTED,font=('Segoe UI',9)).pack(side='left',padx=(0,12))
         self._button(toolbar,'EDITOR',self.show_editor,small=True).pack(side='left',padx=(0,5))
         self._button(toolbar,'✦ AUTODIRECTOR',self.open_autodirector,True,small=True).pack(side='left')
-        self._button(toolbar,'Export MP4  ↗',self.export_dialog).pack(side='right',padx=(8,0))
+        self._button(toolbar,'GPU / AI EXPORT ↗',self.export_dialog,True).pack(side='right',padx=(8,0))
         self._button(toolbar,'✦ QUALITY LAB',self.open_quality_lab,True).pack(side='right',padx=(8,0))
         self._button(toolbar,'↻ UPDATES',self.open_update_center,small=True).pack(side='right',padx=(8,0))
         self._button(toolbar,'Save Project',self.save_project).pack(side='right',padx=4)
@@ -1075,7 +1075,7 @@ class Studio(tk.Tk):
             return
         if self.exporting:return
         dialog=tk.Toplevel(self)
-        dialog.title('Export Cazy Studio Video')
+        dialog.title(f'Cazy Studio v{APP_VERSION} — GPU / AI Export')
         dialog.configure(bg=CARD)
         dialog.geometry('520x600')
         dialog.resizable(False,False)
