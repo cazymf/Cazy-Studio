@@ -1,0 +1,88 @@
+name: Publish Cazy Studio v0.4.8 Experimental Restoration
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish-editor-restoration-0408.yml']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: publish-editor-restoration-0408
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GUI test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y python3-tk xvfb ffmpeg
+      - name: Validate audio mixing, editor and Music Hunter
+        run: |
+          set -euo pipefail
+          python -m compileall -q source tests
+          python -m unittest discover -s tests -p 'test_editor_gpu_0405.py' -v
+          python -m unittest discover -s tests -p 'test_preview_audio_0404.py' -v
+          python -m unittest discover -s tests -p 'test_editor_shared_music_0403.py' -v
+          python -m unittest discover -s tests -p 'test_export_random_music_0329.py' -v
+          xvfb-run -a /usr/bin/python3 tests/gui_smoke_music_hunter_0328.py
+      - name: Build ZIP and verify install and rollback using v0.4.6 updater
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/base release/stage release/out
+          gh release download v0.4.6 --repo "$GITHUB_REPOSITORY" --pattern 'Cazy_Studio_v0_4_6_Update.zip' --dir release/base
+          cp source/app.py source/quality_engine.py source/quality_ui.py source/update_core.py source/version.py release/stage/
+          PYTHONPATH=source python - <<'PY'
+          import importlib.util, tempfile, zipfile
+          from pathlib import Path
+          import update_core
+          root = Path('release')
+          previous = root / 'base/Cazy_Studio_v0_4_6_Update.zip'
+          archive = root / 'out/Cazy_Studio_v0_4_8_Update.zip'
+          manifest = update_core.build_update_zip(root / 'stage', archive, '0.4.8')
+          approved = {'app.py','quality_engine.py','quality_ui.py','update_core.py','version.py'}
+          assert set(manifest['files']) == approved
+          with zipfile.ZipFile(archive) as z:
+              source = z.read('app.py').decode('utf-8')
+              assert 'GPU / AI EXPORT' in source
+              assert 'Editor processing pipeline' in source
+              assert 'def _render_editor_pipeline(' in source
+              assert 'def _editor_fast_render(' in source
+              assert 'APP_VERSION = '+chr(39)+'0.4.8'+chr(39) in z.read('version.py').decode('utf-8')
+          with tempfile.TemporaryDirectory() as temp:
+              folder = Path(temp)
+              legacy_file = folder / 'legacy.py'
+              with zipfile.ZipFile(previous) as z:
+                  legacy_file.write_bytes(z.read('update_core.py'))
+              spec = importlib.util.spec_from_file_location('legacy_updater', legacy_file)
+              legacy = importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(legacy)
+              legacy.inspect_update_zip(archive, '0.4.8')
+              installed = folder / 'installation'
+              installed.mkdir()
+              with zipfile.ZipFile(previous) as z:
+                  for name in legacy.inspect_update_zip(previous, '0.4.6')['files']:
+                      (installed / name).write_bytes(z.read(name))
+              sentinel = installed / 'recording.mp4'
+              sentinel.write_bytes(b'preserve-user-files')
+              legacy.apply_update_zip(archive, installed, '0.4.8')
+              for name in approved:
+                  assert (installed / name).read_bytes() == (root / 'stage' / name).read_bytes()
+              assert sentinel.read_bytes() == b'preserve-user-files'
+              legacy.rollback_latest(installed)
+              assert (installed / 'version.py').read_text().strip() == "APP_VERSION = '0.4.6'"
+              assert sentinel.read_bytes() == b'preserve-user-files'
+          print('v0.4.6 updater verified installation and rollback of v0.4.8')
+          PY
+      - name: Publish verified updater asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create v0.4.8 release/out/Cazy_Studio_v0_4_8_Update.zip \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title 'Cazy Studio v0.4.8 — Experimental AI Restoration' \
+            --notes 'Experimental Quality Lab update: external RealBasicVSR and EGVSR runtime integration, adaptive temporal smoothing and metadata inspector. External models and EGVSR adapter are not bundled. GPU inference and true motion-vector blur are not validated or included. Rollback to v0.4.6 is tested by this workflow.' --latest
