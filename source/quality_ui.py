@@ -132,6 +132,7 @@ class QualityLab(tk.Toplevel):
         self.option(controls,'Video encoder','encoder',['Auto / NVIDIA NVENC','CPU x264','HEVC / NVIDIA NVENC','AV1 / NVIDIA NVENC'],5,1)
         self.option(controls,'Encoding quality','quality',quality.QUALITY_LEVELS,6,0)
         self.option(controls,'AI speed / real frames','ai_speed',['Fast (30 FPS)','Balanced (60 FPS)','Every output frame'],7,0)
+        self.option(controls,'Temporal effect','motion_blur_mode',['Temporal mix','Adaptive temporal smoothing'],7,1)
         disk=tk.Frame(controls,bg=CARD);disk.grid(row=8,column=0,columnspan=2,sticky='ew',padx=8,pady=(10,1))
         self.label(disk,'AI scratch workspace (cropped frames; automatically cleaned)',MUTED,9).pack(anchor='w')
         line2=tk.Frame(disk,bg=CARD);line2.pack(fill='x')
@@ -159,6 +160,7 @@ class QualityLab(tk.Toplevel):
                  command=lambda e:self._paint_compare()).pack(fill='x')
         self.label(side,'Slide to compare original vs enhanced. Still previews exclude temporal and AI models.',MUTED,9).pack(anchor='w',pady=(1,12))
         self.button(side,'COMPARE CURRENT FRAME',self.compare).pack(fill='x',pady=4)
+        self.button(side,'VIDEO QUALITY INSPECTOR',self.inspect_quality).pack(fill='x',pady=4)
         self.button(side,'RENDER 3-SECOND TEST',lambda:self.export(sample=True)).pack(fill='x',pady=4)
         self.button(side,'EXPORT ENHANCED MP4',lambda:self.export(sample=False),True).pack(fill='x',pady=(6,5))
         self.button(side,'Open Last Export',self.open_last).pack(fill='x',pady=4)
@@ -190,6 +192,37 @@ class QualityLab(tk.Toplevel):
                  font=('Segoe UI',10,'bold')).pack(fill='x',pady=(2,2))
         self.progress_bar=ttk.Progressbar(foot,orient='horizontal',mode='determinate',maximum=100)
         self.progress_bar.pack(fill='x',pady=(2,3))
+
+    def inspect_quality(self):
+        if not self.info:
+            return
+        try:
+            opts = self._collect()
+            w, h, fps = quality.output_specs(self.info, opts)
+            info = self.info
+            duration = float(getattr(info, 'duration', 0) or 0)
+            source_fps = float(info.fps or 0)
+            lines = [
+                f'Source: {info.width} x {info.height} @ {source_fps:g} FPS',
+                f'Source duration: {duration:.2f} seconds',
+                f'Output: {w} x {h} @ {fps:g} FPS',
+                f'Frame generation: {opts.frame_method}',
+                f'Upscaler: {opts.upscale}',
+                f'Temporal effect: {opts.motion_blur_mode} ({opts.motion_blur}/3)',
+                f'Encoder requested: {opts.encoder}',
+                f'Render start: {opts.start:.2f}s',
+                f'Render duration: {opts.duration:.2f}s' if opts.duration else 'Render duration: remaining source',
+                'Metadata and requested settings only; actual GPU use and perceptual quality require a rendered test.'
+            ]
+            if fps > source_fps and opts.frame_method == 'Native / Duplicate':
+                lines.append('Output repeats frames; no new motion detail is synthesized.')
+            if w > info.width or h > info.height:
+                lines.append('Output dimensions exceed source in at least one axis.')
+            from tkinter import messagebox
+            messagebox.showinfo('Video quality inspector', '\n'.join(lines), parent=self)
+        except Exception as exc:
+            from tkinter import messagebox
+            messagebox.showerror('Video quality inspector', str(exc), parent=self)
 
     def choose_scratch(self):
         folder=filedialog.askdirectory(parent=self,title='Choose AI scratch folder on a drive with free space')
