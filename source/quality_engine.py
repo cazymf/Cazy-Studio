@@ -45,6 +45,7 @@ class QualitySettings:
     denoise: int = 0  # 0..3
     sharpen: int = 20  # 0..100
     motion_blur: int = 0  # 0..3
+    motion_blur_mode: str = 'Temporal mix'
     contrast: int = 100  # 80..130
     saturation: int = 105  # 80..150
     encoder: str = 'Auto / NVIDIA NVENC'  # or CPU x264
@@ -66,6 +67,8 @@ class QualitySettings:
         if self.fit not in ('Fill / crop', 'Fit / black bars'): raise ValueError('Unknown frame fitting')
         if not 0 <= self.denoise <= 3: raise ValueError('Denoise out of range')
         if not 0 <= self.sharpen <= 100: raise ValueError('Sharpen out of range')
+        if self.motion_blur_mode not in ('Temporal mix', 'Adaptive temporal smoothing'):
+            raise ValueError('Unknown motion blur mode')
         if not 0 <= self.motion_blur <= 3: raise ValueError('Motion blur out of range')
         if not 80 <= self.contrast <= 130: raise ValueError('Contrast out of range')
         if not 80 <= self.saturation <= 150: raise ValueError('Saturation out of range')
@@ -213,8 +216,14 @@ def _filter_chain(info: engine.MediaInfo, opts: QualitySettings, *,
             fs.append(f'fps={fps}')
         if opts.motion_blur:
             n=opts.motion_blur+1
-            weights=' '.join(str(x) for x in range(1,n+1))
-            fs.append(f'tmix=frames={n}:weights=\'{weights}\'')
+            if opts.motion_blur_mode == 'Adaptive temporal smoothing':
+                # Motion-sensitive temporal denoising, not vector-based RSMB.
+                # Retain fine static detail and limit trails across moving edges.
+                strength = {1: 1.0, 2: 2.0, 3: 3.0}[opts.motion_blur]
+                fs.append(f'atadenoise=0a={strength*.01:.3f}:0b={strength*.02:.3f}:s=5')
+            else:
+                weights=' '.join(str(x) for x in range(1,n+1))
+                fs.append(f'tmix=frames={n}:weights=\'{weights}\'')
     if opts.fit=='Fill / crop':
         fs += [f'scale={w}:{h}:force_original_aspect_ratio=increase:flags=lanczos',
                f'crop={w}:{h}']
@@ -3155,9 +3164,9 @@ def creative_vsr_preflight(model,model_dir='',weights='',python_exe=''):
     model=str(model)
     if model not in ('RealBasicVSR','EGVSR'):
         raise ValueError('Choose RealBasicVSR or EGVSR.')
-    repo=Path(model_dir).expanduser() if model_dir else Path('.')
-    checkpoint=Path(weights).expanduser() if weights else None
-    executable=Path(python_exe).expanduser() if python_exe else Path(sys.executable)
+    repo=Path(model_dir).expanduser().resolve() if model_dir else Path('.').resolve()
+    checkpoint=Path(weights).expanduser().resolve() if weights else None
+    executable=Path(python_exe).expanduser().resolve() if python_exe else Path(sys.executable).resolve()
     script=repo/('inference_realbasicvsr.py' if model=='RealBasicVSR'
                  else 'cazy_egvsr_video.py')
     config=repo/'configs'/'realbasicvsr_x4.py'
@@ -3250,7 +3259,7 @@ def creative_vsr_ab_preview(source,destination,model,model_dir,weights,
             raise RuntimeError('Side-by-side comparison failed.')
     if progress:progress(1.,model+' A/B video created; inspect for flicker and detail')
     return {'comparison':str(output),'model':model,'source':str(source),
-            'seconds':seconds,'gpu_tested':True,'left':'Original (scaled)',
+            'seconds':seconds,'gpu_tested':False,'left':'Original (scaled)',
             'right':model,'audio':'None — comparison only'}
 
 
