@@ -46,6 +46,10 @@ class QualitySettings:
     sharpen: int = 20  # 0..100
     motion_blur: int = 0  # 0..3
     motion_blur_mode: str = 'Temporal mix'
+    restoration_model: str = 'Off'
+    restoration_repo: str = ''
+    restoration_weights: str = ''
+    restoration_python: str = ''
     contrast: int = 100  # 80..130
     saturation: int = 105  # 80..150
     encoder: str = 'Auto / NVIDIA NVENC'  # or CPU x264
@@ -67,6 +71,8 @@ class QualitySettings:
         if self.fit not in ('Fill / crop', 'Fit / black bars'): raise ValueError('Unknown frame fitting')
         if not 0 <= self.denoise <= 3: raise ValueError('Denoise out of range')
         if not 0 <= self.sharpen <= 100: raise ValueError('Sharpen out of range')
+        if self.restoration_model not in ('Off', 'RealBasicVSR', 'EGVSR'):
+            raise ValueError('Unknown restoration model')
         if self.motion_blur_mode not in ('Temporal mix', 'Adaptive temporal smoothing'):
             raise ValueError('Unknown motion blur mode')
         if not 0 <= self.motion_blur <= 3: raise ValueError('Motion blur out of range')
@@ -752,6 +758,8 @@ def render_quality(path: str, output: str, opts: QualitySettings, status: Callab
     advertises NVENC but no GPU, the encoder is retried with x264.
     """
     opts.validate()
+    if opts.restoration_model != 'Off':
+        return render_restored_quality(path, output, opts, status, cancel, sample, root, progress)
     info=engine.probe(path)
     if info.kind!='video':raise ValueError('Quality Lab accepts video footage only')
     w,h,fps=output_specs(info,opts)
@@ -3275,3 +3283,84 @@ def creative_bug_report_path(destination,title='Cazy Studio Test Notes'):
         candidate=folder/(f'{base}_{date}_{number}.md')
         number+=1
     return candidate
+
+
+def render_restored_quality(path, output, opts, status=None, cancel=None,
+                            sample=False, root=None, progress=None):
+    """Explicit external temporal inference, then the existing Quality Lab export."""
+    config = creative_vsr_preflight(opts.restoration_model, opts.restoration_repo,
+                                    opts.restoration_weights, opts.restoration_python)
+    if not config['ready']:
+        raise RuntimeError(config['message'])
+    source = str(Path(path).resolve())
+    destination = Path(output).resolve()
+    if Path(source) == destination:
+        raise ValueError('Choose an output different from the original recording.')
+    info = engine.probe(source)
+    if info.kind != 'video':
+        raise ValueError('Restoration requires a video.')
+    duration = _start_duration(info, opts, sample)
+    if duration <= 0:
+        raise ValueError('Empty restoration range.')
+    ff = _creative_ffmpeg()
+    rate = float(info.fps)
+    if not math.isfinite(rate) or rate <= 0:
+        raise ValueError('Invalid source frame rate.')
+    def report(pct, message):
+        if status: status(message)
+        if progress: progress(pct, message, None, None)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix='cazy_restore_', dir=opts.scratch_dir or None) as scratch:
+        tmp = Path(scratch).resolve()
+        clip, enhanced, joined, final = [tmp / name for name in
+            ('trim.mp4', 'restored.mp4', 'with_audio.mp4', 'final.mp4')]
+        report(2, 'Extracting source trim at native FPS')
+        _creative_run([ff,'-hide_banner','-loglevel','error','-y','-nostdin',
+                       '-ss',str(opts.start),'-i',source,'-t',str(duration),
+                       '-map','0:v:0','-an','-c:v','libx264','-crf','15',
+                       '-pix_fmt','yuv420p',str(clip)],cancel=cancel,timeout=1800)
+        model = opts.restoration_model
+        if model == 'RealBasicVSR':
+            command = [config['python'],config['script'],config['config'],
+                       config['weights'],str(clip),str(enhanced),
+                       '--max-seq-len=10',f'--fps={rate:g}']
+        else:
+            command = [config['python'],config['script'],'--input',str(clip),
+                       '--output',str(enhanced),'--weights',config['weights']]
+        report(10, 'Running '+model+' temporal inference (external runtime)')
+        _creative_run(command,cancel=cancel,timeout=14400,cwd=config['repository'])
+        if not enhanced.is_file() or enhanced.stat().st_size < 1024:
+            raise RuntimeError(model+' did not produce a usable video.')
+        restored = engine.probe(str(enhanced))
+        if restored.kind != 'video' or abs(restored.fps-rate) > .1:
+            raise RuntimeError('Restoration changed the source frame rate; refusing an unsynchronized export.')
+        if abs(restored.duration-duration) > max(.15,2/rate):
+            raise RuntimeError('Restoration changed the clip duration; refusing an unsynchronized export.')
+        report(75, 'Restoring original audio track')
+        _creative_run([ff,'-hide_banner','-loglevel','error','-y','-nostdin',
+                       '-i',str(enhanced),'-ss',str(opts.start),'-i',source,
+                       '-map','0:v:0','-map','1:a:0?','-c:v','copy','-c:a','aac',
+                       '-t',str(duration),str(joined)],cancel=cancel,timeout=1800)
+        effective=opts.clone()
+        effective.restoration_model='Off'
+        effective.start=0.
+        effective.duration=duration
+        if opts.resolution == 'Source':
+            # Preserve the established source-resolution preset behavior where possible.
+            pass
+        render_quality(str(joined),str(final),effective,status,cancel,False,root,
+                       (lambda pct,stage,done,total: progress(78+float(pct)*.21,stage,done,total))
+                       if progress else None)
+        if cancel is not None and cancel.is_set():
+            raise RuntimeError('Restoration cancelled.')
+        # Copy across scratch volumes safely, then atomically replace destination.
+        import shutil
+        import uuid
+        staging=destination.with_name('.'+destination.name+'.'+uuid.uuid4().hex+'.tmp')
+        try:
+            shutil.copyfile(final,staging)
+            os.replace(staging,destination)
+        finally:
+            if staging.exists(): staging.unlink()
+    report(100, 'Restoration export complete')
+    return str(destination)
